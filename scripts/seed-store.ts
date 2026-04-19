@@ -91,9 +91,23 @@ function requireEnv(name: string): string {
   return v
 }
 
+// The admin api client wants a bare host (my-shop.myshopify.com). A user who
+// pasted the full admin URL from the browser would otherwise silently 401.
+function normalizeDomain(raw: string): string {
+  return raw.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+}
+
+function tokenPrefix(token: string): string {
+  const idx = token.indexOf('_')
+  return idx > 0 ? `${token.slice(0, idx + 1)}…` : '(no underscore)'
+}
+
 async function main() {
-  const storeDomain = requireEnv('SHOPIFY_STORE_DOMAIN')
+  const storeDomain = normalizeDomain(requireEnv('SHOPIFY_STORE_DOMAIN'))
   const accessToken = requireEnv('SHOPIFY_ADMIN_ACCESS_TOKEN')
+
+  console.log(`store:  ${storeDomain}`)
+  console.log(`token:  ${tokenPrefix(accessToken)} (len=${accessToken.length})`)
 
   const fixturesPath = resolve(process.cwd(), 'fixtures/demo-store/products.json')
   const products = JSON.parse(readFileSync(fixturesPath, 'utf-8')) as FixtureProduct[]
@@ -101,7 +115,7 @@ async function main() {
   const client = createAdminApiClient({
     storeDomain,
     accessToken,
-    apiVersion: '2025-01',
+    apiVersion: '2026-01',
   })
 
   console.log(`seeding ${products.length} products into ${storeDomain}…`)
