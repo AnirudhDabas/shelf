@@ -176,6 +176,14 @@ export async function runLoop(
           error: `generator failed: ${errMsg}`,
         }),
       )
+      sessionLogger.recordAttempt()
+      sessionLogger.recordDeadEnd({
+        iteration,
+        productId: product.id,
+        productTitle: product.title,
+        description: 'hypothesis generation failed',
+        reason: `generator: ${errMsg}`,
+      })
       recentVerdicts.push('apply_failed')
       persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
       continue
@@ -193,6 +201,7 @@ export async function runLoop(
     })
 
     recordAttempt(tried, product.id, hypothesis)
+    sessionLogger.recordAttempt()
 
     const checks = checkHypothesis(hypothesis, product)
     if (!checks.passed) {
@@ -221,6 +230,13 @@ export async function runLoop(
         hypothesisId: hypothesis.id,
         failures: checks.failures,
       })
+      sessionLogger.recordDeadEnd({
+        iteration,
+        productId: product.id,
+        productTitle: hypothesis.productTitle,
+        description: hypothesis.description,
+        reason: `checks failed: ${checks.failures[0] ?? 'unknown'}`,
+      })
       recentVerdicts.push('checks_failed')
       persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
       continue
@@ -245,6 +261,13 @@ export async function runLoop(
         error: errMsg,
       })
       jsonl.append(log)
+      sessionLogger.recordDeadEnd({
+        iteration,
+        productId: product.id,
+        productTitle: hypothesis.productTitle,
+        description: hypothesis.description,
+        reason: `apply failed: ${errMsg}`,
+      })
       recentVerdicts.push('apply_failed')
       persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
       continue
@@ -292,6 +315,13 @@ export async function runLoop(
         error: revertError ? `${errMsg}; revert failed: ${revertError}` : errMsg,
       })
       jsonl.append(log)
+      sessionLogger.recordDeadEnd({
+        iteration,
+        productId: product.id,
+        productTitle: hypothesis.productTitle,
+        description: hypothesis.description,
+        reason: revertError ? `measure failed: ${errMsg}; revert failed: ${revertError}` : `measure failed: ${errMsg}`,
+      })
       recentVerdicts.push('measure_failed')
       persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
       continue
@@ -372,6 +402,23 @@ export async function runLoop(
       productId: product.id,
       log,
     })
+    if (verdict === 'kept' || verdict === 'kept_uncertain') {
+      sessionLogger.recordKeyWin({
+        iteration,
+        productId: product.id,
+        productTitle: hypothesis.productTitle,
+        description: hypothesis.description,
+        scoreDelta,
+      })
+    } else {
+      sessionLogger.recordDeadEnd({
+        iteration,
+        productId: product.id,
+        productTitle: hypothesis.productTitle,
+        description: hypothesis.description,
+        reason: errorField ?? `reverted (Δ ${scoreDelta.toFixed(2)}, ${confidence.level})`,
+      })
+    }
     recentVerdicts.push(verdict)
     persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
 

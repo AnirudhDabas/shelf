@@ -1,0 +1,473 @@
+#!/usr/bin/env node
+import { spawn } from 'node:child_process'
+import { existsSync, writeFileSync, unlinkSync } from 'node:fs'
+import { createInterface } from 'node:readline/promises'
+import { stdin, stdout } from 'node:process'
+import { resolve } from 'node:path'
+import chalk from 'chalk'
+import { Command } from 'commander'
+import Table from 'cli-table3'
+import ora from 'ora'
+import { ConfigError, loadConfig } from './config.js'
+import { ShelfEventEmitter } from './events/emitter.js'
+import type { ShelfEvent } from './events/emitter.js'
+import { JsonlLogger } from './logger/jsonl.js'
+import { runLoop } from './loop.js'
+import { QueryGenerator } from './queries/generator.js'
+import { buildProviders, measureScore } from './scorer/index.js'
+import { ShopifyAdminClient } from './shopify/admin.js'
+import { FileCache } from './utils/cache.js'
+
+const program = new Command()
+
+program
+  .name('shelf')
+  .description(
+    'Autoresearch loop for Shopify catalogs — raise how often AI shopping agents surface your products.',
+  )
+  .version('0.1.0')
+
+program
+  .command('init')
+  .description('Create a .env file by prompting for Shopify credentials and provider API keys.')
+  .option('-f, --force', 'Overwrite existing .env', false)
+  .action(async (options: { force: boolean }) => {
+    const envPath = resolve(process.cwd(), '.env')
+    if (existsSync(envPath) && !options.force) {
+      console.log(chalk.yellow('! .env already exists — re-run with --force to overwrite.'))
+      return
+    }
+    const rl = createInterface({ input: stdin, output: stdout })
+    const ask = async (prompt: string, fallback = ''): Promise<string> => {
+      const answer = (await rl.question(chalk.cyan(prompt))).trim()
+      return answer || fallback
+    }
+    console.log(chalk.bold('\nshelf init\n'))
+    const domain = await ask('Shopify store domain (e.g. my-shop.myshopify.com): ')
+    const adminToken = await ask('Shopify Admin API access token: ')
+    const storefrontToken = await ask('Shopify Storefront API access token: ')
+    console.log(chalk.dim('\nAt least one scoring provider key is required.\n'))
+    const perplexity = await ask('Perplexity API key (enter to skip): ')
+    const openai = await ask('OpenAI API key (enter to skip): ')
+    const anthropic = await ask('Anthropic API key (required for hypothesis + query generation): ')
+    rl.close()
+
+    const lines = [
+      `SHOPIFY_STORE_DOMAIN=${domain}`,
+      `SHOPIFY_ADMIN_ACCESS_TOKEN=${adminToken}`,
+      `SHOPIFY_STOREFRONT_ACCESS_TOKEN=${storefrontToken}`,
+    ]
+    if (perplexity) lines.push(`PERPLEXITY_API_KEY=${perplexity}`)
+    if (openai) lines.push(`OPENAI_API_KEY=${openai}`)
+    if (anthropic) lines.push(`ANTHROPIC_API_KEY=${anthropic}`)
+    writeFileSync(envPath, lines.join('\n') + '\n', 'utf-8')
+    console.log(chalk.green(`\n✓ wrote ${envPath}`))
+  })
+
+program
+  .command('run')
+  .description('Run the autoresearch loop: generate hypotheses, apply, re-measure, keep or revert.')
+  .option('--dry-run', 'Skip live provider calls (uses cached or stub results)', false)
+  .option('--max-iterations <n>', 'Override maxIterations from config', parseIntArg)
+  .option('--budget <usd>', 'Override budget limit in USD', parseFloatArg)
+  .option('--repetitions <n>', 'Queries repetitions per measurement', parseIntArg)
+  .option('--store-category <label>', 'Category hint for hypothesis + query generation')
+  .action(
+    async (options: {
+      dryRun: boolean
+      maxIterations?: number
+      budget?: number
+      repetitions?: number
+      storeCategory?: string
+    }) => {
+      const config = safeLoadConfig({
+        dryRun: options.dryRun,
+        maxIterations: options.maxIterations,
+        budgetLimitUsd: options.budget,
+        queriesPerMeasurement: options.repetitions,
+      })
+      const emitter = new ShelfEventEmitter()
+      emitter.onAny(renderEvent)
+      console.log(chalk.bold.cyan('\n🛒 shelf run\n'))
+      try {
+        const final = await runLoop(config, emitter, {
+          storeCategory: options.storeCategory,
+        })
+        console.log(
+          chalk.bold(
+            `\nDone. Final score: ${final.currentScore.toFixed(1)}  (baseline ${final.baselineScore.toFixed(1)}, Δ ${(final.currentScore - final.baselineScore).toFixed(1)})`,
+          ),
+        )
+        console.log(chalk.dim(`Session file: ${config.paths.sessionFile}`))
+        console.log(chalk.dim(`Experiment log: ${config.paths.logFile}`))
+      } catch (err) {
+        console.error(chalk.red(`\n✗ run failed: ${errorMessage(err)}`))
+        process.exitCode = 1
+      }
+    },
+  )
+
+program
+  .command('score')
+  .description('Run a one-shot baseline measurement against the current catalog without modifying anything.')
+  .option('--dry-run', 'Skip live provider calls', false)
+  .option('--repetitions <n>', 'Queries repetitions per measurement', parseIntArg)
+  .option('--query-count <n>', 'Number of queries to generate', parseIntArg, 50)
+  .option('--store-category <label>', 'Category hint for query generation')
+  .action(
+    async (options: {
+      dryRun: boolean
+      repetitions?: number
+      queryCount: number
+      storeCategory?: string
+    }) => {
+      const config = safeLoadConfig({ dryRun: options.dryRun, queriesPerMeasurement: options.repetitions })
+      const anthropicKey = config.providers.anthropic?.apiKey
+      if (!anthropicKey) {
+        console.error(chalk.red('✗ ANTHROPIC_API_KEY required to generate queries.'))
+        process.exitCode = 1
+        return
+      }
+      const cache = new FileCache()
+      const providers = buildProviders(config, { cache, dryRun: config.dryRun })
+      if (providers.length === 0) {
+        console.error(chalk.red('✗ no scoring providers configured.'))
+        process.exitCode = 1
+        return
+      }
+
+      const admin = new ShopifyAdminClient({
+        storeDomain: config.store.domain,
+        accessToken: config.store.adminAccessToken,
+      })
+      const fetchSpin = ora('Fetching products from Shopify Admin API').start()
+      let products
+      try {
+        products = await admin.listProducts()
+        fetchSpin.succeed(`Fetched ${products.length} products`)
+      } catch (err) {
+        fetchSpin.fail(`Failed to fetch products: ${errorMessage(err)}`)
+        process.exitCode = 1
+        return
+      }
+
+      const querySpin = ora(`Generating ${options.queryCount} queries`).start()
+      let queries
+      try {
+        const generator = new QueryGenerator({ apiKey: anthropicKey })
+        queries = await generator.generate({
+          products,
+          count: options.queryCount,
+          storeCategory: options.storeCategory,
+        })
+        querySpin.succeed(`Generated ${queries.length} queries`)
+      } catch (err) {
+        querySpin.fail(`Query generation failed: ${errorMessage(err)}`)
+        process.exitCode = 1
+        return
+      }
+
+      const scoreSpin = ora('Measuring AI Shelf Score (this can take a few minutes)').start()
+      try {
+        const result = await measureScore(queries, config.store.domain, providers, {
+          repetitions: config.loop.queriesPerMeasurement,
+        })
+        scoreSpin.succeed(`Baseline score: ${result.overall.toFixed(1)}/100`)
+        const table = new Table({
+          head: [chalk.bold('provider'), chalk.bold('score')],
+          colWidths: [18, 12],
+        })
+        for (const [name, score] of Object.entries(result.byProvider)) {
+          table.push([name, `${score.toFixed(1)}`])
+        }
+        console.log(table.toString())
+        console.log(
+          chalk.dim(
+            `queries: ${result.queriesMatched}/${result.queriesTotal} surfaced · cost: $${result.totalCostUsd.toFixed(4)}`,
+          ),
+        )
+      } catch (err) {
+        scoreSpin.fail(`Measurement failed: ${errorMessage(err)}`)
+        process.exitCode = 1
+      }
+    },
+  )
+
+program
+  .command('dashboard')
+  .description('Launch the Next.js dashboard that tails shelf.jsonl in real time.')
+  .option('-p, --port <port>', 'Port to bind', '3000')
+  .action((options: { port: string }) => {
+    const args = ['--filter', '@shelf/dashboard', 'dev', '--', '--port', options.port]
+    const child = spawn('pnpm', args, { stdio: 'inherit', shell: process.platform === 'win32' })
+    child.on('exit', (code) => {
+      process.exitCode = code ?? 0
+    })
+    child.on('error', (err) => {
+      console.error(chalk.red(`✗ failed to start dashboard: ${err.message}`))
+      console.error(chalk.dim('  ensure pnpm is installed and the dashboard package exists.'))
+      process.exitCode = 1
+    })
+  })
+
+program
+  .command('reset')
+  .description('Delete shelf.jsonl and shelf.md so the next run starts fresh.')
+  .option('-y, --yes', 'Skip confirmation prompt', false)
+  .action(async (options: { yes: boolean }) => {
+    const config = safeLoadConfig({})
+    const logPath = resolve(process.cwd(), config.paths.logFile)
+    const sessionPath = resolve(process.cwd(), config.paths.sessionFile)
+    const targets = [logPath, sessionPath].filter(existsSync)
+    if (targets.length === 0) {
+      console.log(chalk.dim('Nothing to reset — no shelf files found.'))
+      return
+    }
+    if (!options.yes) {
+      const rl = createInterface({ input: stdin, output: stdout })
+      const confirm = (
+        await rl.question(chalk.yellow(`Delete ${targets.length} file(s)? [y/N] `))
+      ).trim()
+      rl.close()
+      if (confirm.toLowerCase() !== 'y') {
+        console.log(chalk.dim('aborted.'))
+        return
+      }
+    }
+    for (const p of targets) {
+      unlinkSync(p)
+      console.log(chalk.green(`✓ removed ${p}`))
+    }
+  })
+
+program
+  .command('export')
+  .description('Export shelf.jsonl to CSV or JSON.')
+  .argument('[format]', 'csv | json', 'csv')
+  .option('-o, --out <path>', 'Output file (default stdout)')
+  .action((format: string, options: { out?: string }) => {
+    const config = safeLoadConfig({})
+    const jsonl = new JsonlLogger(config.paths.logFile)
+    const logs = jsonl.readAll()
+    if (logs.length === 0) {
+      console.log(chalk.dim('No experiments logged yet.'))
+      return
+    }
+    let output: string
+    if (format === 'json') {
+      output = JSON.stringify(logs, null, 2)
+    } else if (format === 'csv') {
+      const header = [
+        'id',
+        'iteration',
+        'timestamp',
+        'productId',
+        'hypothesisType',
+        'verdict',
+        'scoreBefore',
+        'scoreAfter',
+        'scoreDelta',
+        'confidence',
+        'confidenceLevel',
+        'durationMs',
+        'costEstimateUsd',
+      ]
+      const rows = logs.map((l) =>
+        [
+          l.id,
+          l.iteration,
+          l.timestamp,
+          l.hypothesis.productId,
+          l.hypothesis.type,
+          l.verdict,
+          l.scoreBefore.toFixed(3),
+          l.scoreAfter.toFixed(3),
+          l.scoreDelta.toFixed(3),
+          l.confidence,
+          l.confidenceLevel,
+          l.durationMs,
+          l.costEstimateUsd.toFixed(6),
+        ]
+          .map(csvCell)
+          .join(','),
+      )
+      output = [header.join(','), ...rows].join('\n') + '\n'
+    } else {
+      console.error(chalk.red(`✗ unknown format: ${format} (expected csv or json)`))
+      process.exitCode = 1
+      return
+    }
+    if (options.out) {
+      writeFileSync(resolve(process.cwd(), options.out), output, 'utf-8')
+      console.log(chalk.green(`✓ wrote ${logs.length} experiments to ${options.out}`))
+    } else {
+      process.stdout.write(output)
+    }
+  })
+
+const queries = program.command('queries').description('Query set utilities.')
+queries
+  .command('generate')
+  .description('Generate a fresh 50-query set from the current catalog and write to disk.')
+  .option('-n, --count <n>', 'Number of queries', parseIntArg, 50)
+  .option('-o, --out <path>', 'Output JSON path', 'shelf-queries.json')
+  .option('--store-category <label>', 'Category hint for query generation')
+  .action(
+    async (options: { count: number; out: string; storeCategory?: string }) => {
+      const config = safeLoadConfig({})
+      const anthropicKey = config.providers.anthropic?.apiKey
+      if (!anthropicKey) {
+        console.error(chalk.red('✗ ANTHROPIC_API_KEY required to generate queries.'))
+        process.exitCode = 1
+        return
+      }
+      const admin = new ShopifyAdminClient({
+        storeDomain: config.store.domain,
+        accessToken: config.store.adminAccessToken,
+      })
+      const fetchSpin = ora('Fetching products').start()
+      const products = await admin.listProducts()
+      fetchSpin.succeed(`Fetched ${products.length} products`)
+
+      const genSpin = ora(`Generating ${options.count} queries`).start()
+      try {
+        const generator = new QueryGenerator({ apiKey: anthropicKey })
+        const result = await generator.generate({
+          products,
+          count: options.count,
+          storeCategory: options.storeCategory,
+        })
+        writeFileSync(resolve(process.cwd(), options.out), JSON.stringify(result, null, 2), 'utf-8')
+        genSpin.succeed(`Wrote ${result.length} queries to ${options.out}`)
+
+        const byIntent: Record<string, number> = {}
+        for (const q of result) byIntent[q.intent] = (byIntent[q.intent] ?? 0) + 1
+        const table = new Table({ head: [chalk.bold('intent'), chalk.bold('count')] })
+        for (const [intent, count] of Object.entries(byIntent)) {
+          table.push([intent, String(count)])
+        }
+        console.log(table.toString())
+      } catch (err) {
+        genSpin.fail(`Failed: ${errorMessage(err)}`)
+        process.exitCode = 1
+      }
+    },
+  )
+
+program.parseAsync(process.argv).catch((err) => {
+  console.error(chalk.red(`✗ ${errorMessage(err)}`))
+  process.exitCode = 1
+})
+
+function safeLoadConfig(overrides: Parameters<typeof loadConfig>[0]) {
+  try {
+    return loadConfig(overrides)
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(chalk.red(`✗ ${err.message}`))
+    } else {
+      console.error(chalk.red(`✗ ${errorMessage(err)}`))
+    }
+    process.exit(1)
+  }
+}
+
+function parseIntArg(raw: string): number {
+  const n = Number.parseInt(raw, 10)
+  if (!Number.isFinite(n)) throw new Error(`expected integer, got ${raw}`)
+  return n
+}
+
+function parseFloatArg(raw: string): number {
+  const n = Number.parseFloat(raw)
+  if (!Number.isFinite(n)) throw new Error(`expected number, got ${raw}`)
+  return n
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function csvCell(v: string | number): string {
+  const s = String(v)
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+function renderEvent(event: ShelfEvent): void {
+  const elapsed = formatElapsed(event.elapsedMs)
+  const cost = `$${event.costUsd.toFixed(3)}`
+  const head = chalk.dim(`[iter ${String(event.iteration).padStart(3)} · ${elapsed} · ${cost}]`)
+  switch (event.type) {
+    case 'session:start':
+      console.log(
+        `${head} ${chalk.bold('▶ session start')}  baseline=${chalk.yellow(event.baselineScore.toFixed(1))} products=${event.productsCount} queries=${event.queriesCount} max=${event.maxIterations} budget=$${event.budgetLimitUsd}`,
+      )
+      break
+    case 'hypothesis:proposed':
+      console.log(
+        `${head} ${chalk.blue('◆ hypothesis')}  ${chalk.bold(event.hypothesis.type)} on ${chalk.cyan(event.hypothesis.productTitle)} — ${truncate(event.hypothesis.description, 72)}`,
+      )
+      break
+    case 'checks:failed':
+      console.log(
+        `${head} ${chalk.yellow('⚠ checks failed')}  ${event.failures.slice(0, 2).join('; ')}`,
+      )
+      break
+    case 'hypothesis:applied':
+      console.log(
+        `${head} ${chalk.magenta('✎ applied')}  ${event.applyResult.changes.length} field change(s) to ${chalk.dim(event.productId)}`,
+      )
+      break
+    case 'measurement:complete': {
+      const delta = event.scoreAfter - event.scoreBefore
+      const sign = delta >= 0 ? '+' : ''
+      const color = delta > 0 ? chalk.green : delta < 0 ? chalk.red : chalk.dim
+      console.log(
+        `${head} ${chalk.cyan('↺ measured')}  ${event.scoreBefore.toFixed(1)} → ${event.scoreAfter.toFixed(1)} (${color(sign + delta.toFixed(2))}, ${event.confidence})`,
+      )
+      break
+    }
+    case 'experiment:kept':
+      console.log(
+        `${head} ${chalk.green.bold('✓ kept')}  ${chalk.green(`+${event.scoreDelta.toFixed(2)}`)} (${event.confidence})`,
+      )
+      break
+    case 'experiment:kept_uncertain':
+      console.log(
+        `${head} ${chalk.greenBright('✓ kept*')}  ${chalk.greenBright(`+${event.scoreDelta.toFixed(2)}`)} (uncertain, ${event.confidence})`,
+      )
+      break
+    case 'experiment:reverted':
+      console.log(
+        `${head} ${chalk.red('✗ reverted')}  Δ ${event.scoreDelta.toFixed(2)} (${event.confidence})`,
+      )
+      break
+    case 'budget:warning':
+      console.log(
+        `${head} ${chalk.yellow.bold('$ budget warning')}  $${event.cumulativeCostUsd.toFixed(2)}/$${event.limitUsd} (remaining $${event.remainingUsd.toFixed(2)})`,
+      )
+      break
+    case 'session:end': {
+      const delta = event.finalScore - event.baselineScore
+      const sign = delta >= 0 ? '+' : ''
+      const color = delta > 0 ? chalk.green : chalk.red
+      console.log(
+        `${head} ${chalk.bold('■ session end')}  ${event.baselineScore.toFixed(1)} → ${event.finalScore.toFixed(1)} (${color(sign + delta.toFixed(1))}) over ${event.totalIterations} iters · reason: ${event.stopReason}`,
+      )
+      break
+    }
+  }
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  const m = Math.floor(totalSeconds / 60)
+  const s = totalSeconds % 60
+  return `${m}m${s.toString().padStart(2, '0')}s`
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 1) + '…'
+}
+
+export { program }
