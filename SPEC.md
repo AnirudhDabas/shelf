@@ -1179,3 +1179,31 @@ Before declaring the project complete, verify:
 - [ ] Zero TypeScript `any` types
 
 Now build the entire project. Start with the workspace setup and work through the execution order above. Do not skip steps. Do not leave TODOs — implement everything fully.
+## UPDATES FROM TECHNICAL REVIEW (add to implementation)
+
+1. Verdict states: use kept | reverted | kept_uncertain | 
+   checks_failed | apply_failed | measure_failed
+
+2. Stopping conditions (add to loop.ts):
+   - No kept changes in last 10 iterations → stop
+   - Score improvement < 0.5 points per iteration averaged over last 15 → stop  
+   - All products above 80/100 → stop
+
+3. Hypothesis object must include:
+   - queryFailurePatterns: string[] (which failing queries this targets)
+   - predictedEffect: string
+   - riskLevel: 'low' | 'medium' | 'high'
+   - promptVersion: string
+
+4. Anti-thrashing: product not eligible for re-selection 
+   for 3 iterations after being modified
+
+5. SSE event types: session:start | hypothesis:proposed | 
+   checks:failed | hypothesis:applied | measurement:complete | 
+   experiment:kept | experiment:reverted | budget:warning | session:end
+   — each with: productId, iteration, scoreDelta, confidence, 
+     costUsd, elapsedMs
+
+6. Factual consistency check in backpressure: 
+   new metafield values must be present in or 
+   inferable from original product data

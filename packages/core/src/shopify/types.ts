@@ -55,6 +55,18 @@ export interface MetafieldsSetInput {
   type: string
 }
 
+export interface MetafieldIdentifierInput {
+  ownerId: string
+  namespace: string
+  key: string
+}
+
+export interface ProductVariantsBulkInput {
+  id: string
+  title?: string
+  price?: string
+}
+
 export interface UserError {
   field: string[] | null
   message: string
@@ -70,6 +82,20 @@ export interface ProductUpdateResponse {
 export interface MetafieldsSetResponse {
   metafieldsSet: {
     metafields: ShopifyMetafield[] | null
+    userErrors: UserError[]
+  }
+}
+
+export interface MetafieldsDeleteResponse {
+  metafieldsDelete: {
+    deletedMetafields: Array<{ key: string; namespace: string }> | null
+    userErrors: UserError[]
+  }
+}
+
+export interface ProductVariantsBulkUpdateResponse {
+  productVariantsBulkUpdate: {
+    productVariants: Array<{ id: string; title: string }> | null
     userErrors: UserError[]
   }
 }

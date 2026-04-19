@@ -1,12 +1,21 @@
 import { createAdminApiClient } from '@shopify/admin-api-client'
 import { retry } from '../utils/retry.js'
 import { GET_PRODUCT, GET_PRODUCTS } from './queries.js'
-import { METAFIELDS_SET, PRODUCT_UPDATE } from './mutations.js'
+import {
+  METAFIELDS_DELETE,
+  METAFIELDS_SET,
+  PRODUCT_UPDATE,
+  PRODUCT_VARIANTS_BULK_UPDATE,
+} from './mutations.js'
 import type {
+  MetafieldIdentifierInput,
+  MetafieldsDeleteResponse,
   MetafieldsSetInput,
   MetafieldsSetResponse,
   ProductUpdateInput,
   ProductUpdateResponse,
+  ProductVariantsBulkInput,
+  ProductVariantsBulkUpdateResponse,
   ShopifyProduct,
 } from './types.js'
 
@@ -142,5 +151,31 @@ export class ShopifyAdminClient {
       throw new Error(`metafieldsSet userErrors: ${msg}`)
     }
     return data.metafieldsSet
+  }
+
+  async deleteMetafields(
+    metafields: MetafieldIdentifierInput[],
+  ): Promise<MetafieldsDeleteResponse['metafieldsDelete']> {
+    const data = await this.request<MetafieldsDeleteResponse>(METAFIELDS_DELETE, { metafields })
+    if (data.metafieldsDelete.userErrors.length > 0) {
+      const msg = data.metafieldsDelete.userErrors.map((e) => e.message).join('; ')
+      throw new Error(`metafieldsDelete userErrors: ${msg}`)
+    }
+    return data.metafieldsDelete
+  }
+
+  async updateVariants(
+    productId: string,
+    variants: ProductVariantsBulkInput[],
+  ): Promise<ProductVariantsBulkUpdateResponse['productVariantsBulkUpdate']> {
+    const data = await this.request<ProductVariantsBulkUpdateResponse>(
+      PRODUCT_VARIANTS_BULK_UPDATE,
+      { productId, variants },
+    )
+    if (data.productVariantsBulkUpdate.userErrors.length > 0) {
+      const msg = data.productVariantsBulkUpdate.userErrors.map((e) => e.message).join('; ')
+      throw new Error(`productVariantsBulkUpdate userErrors: ${msg}`)
+    }
+    return data.productVariantsBulkUpdate
   }
 }
