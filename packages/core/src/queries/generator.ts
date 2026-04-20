@@ -18,7 +18,7 @@ REQUIREMENTS:
    - "purchase": ready to buy, usually with concrete constraints ("waterproof rain jacket under $200", "packable shell for backpacking")
    - "compare": weighing options ("rain jacket vs poncho for festivals", "softshell or hardshell for cycling")
    - "research": learning the category ("what to look for in a lightweight rain jacket", "are DWR coatings worth it")
-3. Every query must legitimately match at least one product in the catalog. targetProductIds must reference product IDs from the input list.
+3. Every query must legitimately match at least one product in the catalog. targetProductIds MUST be copied verbatim from the product ID list provided in the user message. Do NOT invent, guess, or modify IDs — if you can't find a real match, drop the query.
 4. Cover the catalog broadly — no single product should appear in more than ~3 queries.
 5. Do NOT mention brand names from the catalog in the query text. Shoppers search by attributes, not brand codenames.
 6. category should be a short lowercase category label (e.g. "outerwear", "accessories").
@@ -110,6 +110,7 @@ function buildUserPrompt(
   count: number,
   storeCategory: string | undefined,
 ): string {
+  const productIds = products.map((p) => p.id)
   const productLines = products
     .map((p) => {
       const type = p.productType ?? 'product'
@@ -121,6 +122,9 @@ function buildUserPrompt(
   const lines: string[] = []
   if (storeCategory) lines.push(`Catalog category: ${storeCategory}`)
   lines.push(
+    'Product IDs (copy EXACTLY; do not invent):',
+    JSON.stringify(productIds),
+    '',
     `Generate ${count} shopper queries for this catalog:`,
     productLines,
     '',
@@ -172,6 +176,7 @@ function buildQueries(
 
   const productIds = new Set(products.map((p) => p.id))
   const result: ScoringQuery[] = []
+  let droppedHallucinated = 0
 
   for (let i = 0; i < rawQueries.length; i++) {
     const item = rawQueries[i]
@@ -202,12 +207,13 @@ function buildQueries(
         raw,
       )
     }
-    const unknownIds = (targetProductIds as string[]).filter((id) => !productIds.has(id))
-    if (unknownIds.length > 0) {
-      throw new QueryValidationError(
-        `queries[${i}].targetProductIds references unknown ids: ${unknownIds.join(', ')}`,
-        raw,
-      )
+    // The model occasionally hallucinates product GIDs that aren't in the
+    // catalog. Filter those out instead of failing the whole batch — drop
+    // the query only if nothing valid is left.
+    const validIds = (targetProductIds as string[]).filter((id) => productIds.has(id))
+    if (validIds.length === 0) {
+      droppedHallucinated++
+      continue
     }
 
     result.push({
@@ -215,12 +221,20 @@ function buildQueries(
       text,
       category,
       intent: intent as QueryIntent,
-      targetProductIds: targetProductIds as string[],
+      targetProductIds: validIds,
     })
   }
 
   if (result.length === 0) {
-    throw new QueryValidationError('No valid queries produced', raw)
+    throw new QueryValidationError(
+      `No valid queries produced (dropped ${droppedHallucinated} with hallucinated product IDs)`,
+      raw,
+    )
+  }
+  if (droppedHallucinated > 0) {
+    console.warn(
+      `[queries] dropped ${droppedHallucinated} of ${rawQueries.length} queries — model hallucinated product IDs not in catalog`,
+    )
   }
   return result.slice(0, expected)
 }
