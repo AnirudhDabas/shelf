@@ -54,7 +54,9 @@ program
     const adminToken = clientId
       ? ''
       : await ask('Shopify Admin API access token (shpat_…): ')
-    const storefrontToken = await ask('Shopify Storefront API access token: ')
+    const storefrontToken = await ask(
+      'Shopify Storefront API access token (enter to skip — not needed for the core loop): ',
+    )
     console.log(chalk.dim('\nAt least one scoring provider key is required.\n'))
     const perplexity = await ask('Perplexity API key (enter to skip): ')
     const openai = await ask('OpenAI API key (enter to skip): ')
@@ -69,7 +71,9 @@ program
     if (adminToken) {
       lines.push(`SHOPIFY_ADMIN_ACCESS_TOKEN=${adminToken}`)
     }
-    lines.push(`SHOPIFY_STOREFRONT_ACCESS_TOKEN=${storefrontToken}`)
+    if (storefrontToken) {
+      lines.push(`SHOPIFY_STOREFRONT_ACCESS_TOKEN=${storefrontToken}`)
+    }
     if (perplexity) lines.push(`PERPLEXITY_API_KEY=${perplexity}`)
     if (openai) lines.push(`OPENAI_API_KEY=${openai}`)
     if (anthropic) lines.push(`ANTHROPIC_API_KEY=${anthropic}`)
