@@ -21,7 +21,7 @@ export type {
   BuildProvidersOptions,
 } from './scorer/index.js'
 
-export { ShopifyAdminClient } from './shopify/admin.js'
+export { ShopifyAdminClient, fetchAccessToken } from './shopify/admin.js'
 export { ShopifyStorefrontClient } from './shopify/storefront.js'
 export type { ShopifyProduct, ShopifyVariant } from './shopify/types.js'
 

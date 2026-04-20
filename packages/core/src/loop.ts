@@ -66,10 +66,12 @@ export async function runLoop(
 
   const admin =
     deps.admin ??
-    new ShopifyAdminClient({
+    (await ShopifyAdminClient.create({
       storeDomain: config.store.domain,
       accessToken: config.store.adminAccessToken,
-    })
+      clientId: config.store.clientId,
+      clientSecret: config.store.clientSecret,
+    }))
   const cache = deps.cache ?? new FileCache()
   const providers =
     deps.providers ?? buildProviders(config, { cache, dryRun: config.dryRun })

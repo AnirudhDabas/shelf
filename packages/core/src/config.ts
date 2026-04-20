@@ -5,8 +5,12 @@ import { resolve } from 'node:path'
 export interface ShelfConfig {
   store: {
     domain: string
-    adminAccessToken: string
     storefrontAccessToken: string
+    // Either a long-lived shpat_ token...
+    adminAccessToken?: string
+    // ...or OAuth client credentials. When both are set, client credentials win.
+    clientId?: string
+    clientSecret?: string
   }
   providers: {
     perplexity?: { apiKey: string }
@@ -65,13 +69,17 @@ export function loadConfig(overrides: LoadConfigOverrides = {}): ShelfConfig {
 
   const domain = process.env.SHOPIFY_STORE_DOMAIN
   const adminAccessToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
+  const clientId = process.env.SHOPIFY_CLIENT_ID
+  const clientSecret = process.env.SHOPIFY_CLIENT_SECRET
   const storefrontAccessToken = process.env.SHOPIFY_STOREFRONT_ACCESS_TOKEN
 
   if (!domain) {
     throw new ConfigError('SHOPIFY_STORE_DOMAIN is required. Run `shelf init` to set it up.')
   }
-  if (!adminAccessToken) {
-    throw new ConfigError('SHOPIFY_ADMIN_ACCESS_TOKEN is required.')
+  if (!(clientId && clientSecret) && !adminAccessToken) {
+    throw new ConfigError(
+      'Set SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET (recommended — auto-refreshing OAuth) or SHOPIFY_ADMIN_ACCESS_TOKEN.',
+    )
   }
   if (!storefrontAccessToken) {
     throw new ConfigError('SHOPIFY_STOREFRONT_ACCESS_TOKEN is required.')
@@ -98,6 +106,8 @@ export function loadConfig(overrides: LoadConfigOverrides = {}): ShelfConfig {
     store: {
       domain,
       adminAccessToken,
+      clientId,
+      clientSecret,
       storefrontAccessToken,
     },
     providers,

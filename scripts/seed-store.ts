@@ -5,7 +5,10 @@
  *
  * Env required:
  *   SHOPIFY_STORE_DOMAIN      e.g. shelf-demo.myshopify.com
- *   SHOPIFY_ADMIN_ACCESS_TOKEN
+ *
+ * Admin API auth (one of):
+ *   SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET   (preferred — fresh token per run)
+ *   SHOPIFY_ADMIN_ACCESS_TOKEN                  (long-lived shpat_ token)
  *
  * The catalog is intentionally bad for AI discovery — branded marketing
  * titles, fluffy descriptions, no metafields. shelf's job is to improve it.
@@ -91,6 +94,34 @@ function requireEnv(name: string): string {
   return v
 }
 
+async function fetchAccessToken(
+  storeDomain: string,
+  clientId: string,
+  clientSecret: string,
+): Promise<string> {
+  const url = `https://${storeDomain}/admin/oauth/access_token`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'client_credentials',
+    }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(
+      `OAuth client_credentials failed (${res.status} ${res.statusText}): ${text || '(no body)'}`,
+    )
+  }
+  const body = (await res.json()) as { access_token?: string }
+  if (!body.access_token) {
+    throw new Error('OAuth client_credentials returned no access_token')
+  }
+  return body.access_token
+}
+
 // The admin api client wants a bare host (my-shop.myshopify.com). A user who
 // pasted the full admin URL from the browser would otherwise silently 401.
 function normalizeDomain(raw: string): string {
@@ -104,10 +135,26 @@ function tokenPrefix(token: string): string {
 
 async function main() {
   const storeDomain = normalizeDomain(requireEnv('SHOPIFY_STORE_DOMAIN'))
-  const accessToken = requireEnv('SHOPIFY_ADMIN_ACCESS_TOKEN')
+  const clientId = process.env.SHOPIFY_CLIENT_ID
+  const clientSecret = process.env.SHOPIFY_CLIENT_SECRET
+  const staticToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
 
-  console.log(`store:  ${storeDomain}`)
-  console.log(`token:  ${tokenPrefix(accessToken)} (len=${accessToken.length})`)
+  let accessToken: string
+  if (clientId && clientSecret) {
+    console.log(`store:  ${storeDomain}`)
+    console.log('auth:   OAuth client_credentials → fetching fresh token…')
+    accessToken = await fetchAccessToken(storeDomain, clientId, clientSecret)
+    console.log(`token:  ${tokenPrefix(accessToken)} (len=${accessToken.length})`)
+  } else if (staticToken) {
+    accessToken = staticToken
+    console.log(`store:  ${storeDomain}`)
+    console.log(`token:  ${tokenPrefix(accessToken)} (len=${accessToken.length}, static)`)
+  } else {
+    console.error(
+      'missing auth: set SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET (preferred) or SHOPIFY_ADMIN_ACCESS_TOKEN',
+    )
+    process.exit(1)
+  }
 
   const fixturesPath = resolve(process.cwd(), 'fixtures/demo-store/products.json')
   const products = JSON.parse(readFileSync(fixturesPath, 'utf-8')) as FixtureProduct[]

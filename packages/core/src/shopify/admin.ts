@@ -75,20 +75,123 @@ export interface AdminClientOptions {
   apiVersion?: string
 }
 
+export interface AdminClientCreateOptions {
+  storeDomain: string
+  apiVersion?: string
+  // Provide either a long-lived access token...
+  accessToken?: string
+  // ...or OAuth client credentials, in which case a fresh 24h token is fetched.
+  clientId?: string
+  clientSecret?: string
+}
+
+export interface ClientCredentials {
+  storeDomain: string
+  clientId: string
+  clientSecret: string
+}
+
+// OAuth client_credentials grant. Returns a short-lived (~24h) access token
+// suitable for the Admin GraphQL API. Used when the caller doesn't have a
+// long-lived shpat_ token (e.g. managed installs / Plus stores).
+export async function fetchAccessToken(creds: ClientCredentials): Promise<string> {
+  const url = `https://${creds.storeDomain}/admin/oauth/access_token`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      client_id: creds.clientId,
+      client_secret: creds.clientSecret,
+      grant_type: 'client_credentials',
+    }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(
+      `Shopify OAuth client_credentials failed (${res.status} ${res.statusText}): ${text || '(no body)'}`,
+    )
+  }
+  const body = (await res.json()) as { access_token?: string }
+  if (!body.access_token) {
+    throw new Error('Shopify OAuth client_credentials returned no access_token')
+  }
+  return body.access_token
+}
+
 export class ShopifyAdminClient {
   private client: ReturnType<typeof createAdminApiClient>
+  private readonly storeDomain: string
+  private readonly apiVersion: string
+  private credentials: { clientId: string; clientSecret: string } | null = null
+  private refreshing: Promise<void> | null = null
 
   constructor(options: AdminClientOptions) {
+    this.storeDomain = options.storeDomain
+    this.apiVersion = options.apiVersion ?? '2025-01'
     this.client = createAdminApiClient({
-      storeDomain: options.storeDomain,
+      storeDomain: this.storeDomain,
       accessToken: options.accessToken,
-      apiVersion: options.apiVersion ?? '2025-01',
+      apiVersion: this.apiVersion,
     })
+  }
+
+  static async create(options: AdminClientCreateOptions): Promise<ShopifyAdminClient> {
+    if (options.clientId && options.clientSecret) {
+      const accessToken = await fetchAccessToken({
+        storeDomain: options.storeDomain,
+        clientId: options.clientId,
+        clientSecret: options.clientSecret,
+      })
+      const client = new ShopifyAdminClient({
+        storeDomain: options.storeDomain,
+        accessToken,
+        apiVersion: options.apiVersion,
+      })
+      // Retain creds so we can refresh on 401 mid-run (24h token TTL).
+      client.credentials = { clientId: options.clientId, clientSecret: options.clientSecret }
+      return client
+    }
+    if (options.accessToken) {
+      return new ShopifyAdminClient({
+        storeDomain: options.storeDomain,
+        accessToken: options.accessToken,
+        apiVersion: options.apiVersion,
+      })
+    }
+    throw new Error(
+      'ShopifyAdminClient.create: provide accessToken, or clientId + clientSecret',
+    )
+  }
+
+  private async refreshAccessToken(): Promise<void> {
+    if (!this.credentials) return
+    // Coalesce concurrent refreshes so we don't fetch N tokens for N in-flight requests.
+    if (!this.refreshing) {
+      this.refreshing = (async () => {
+        const accessToken = await fetchAccessToken({
+          storeDomain: this.storeDomain,
+          clientId: this.credentials!.clientId,
+          clientSecret: this.credentials!.clientSecret,
+        })
+        this.client = createAdminApiClient({
+          storeDomain: this.storeDomain,
+          accessToken,
+          apiVersion: this.apiVersion,
+        })
+      })().finally(() => {
+        this.refreshing = null
+      })
+    }
+    await this.refreshing
   }
 
   private async request<T>(query: string, variables: Record<string, unknown>): Promise<T> {
     return retry(async () => {
-      const response = await this.client.request<T>(query, { variables })
+      let response = await this.client.request<T>(query, { variables })
+      if (response.errors?.networkStatusCode === 401 && this.credentials) {
+        await this.refreshAccessToken()
+        response = await this.client.request<T>(query, { variables })
+      }
       if (response.errors) {
         const graphqlErrors = response.errors.graphQLErrors ?? []
         const messages = graphqlErrors.map((e) => e.message).join('; ')

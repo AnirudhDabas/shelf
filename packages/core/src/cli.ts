@@ -44,7 +44,16 @@ program
     }
     console.log(chalk.bold('\nshelf init\n'))
     const domain = await ask('Shopify store domain (e.g. my-shop.myshopify.com): ')
-    const adminToken = await ask('Shopify Admin API access token: ')
+    console.log(
+      chalk.dim(
+        '\nFor Admin API auth, prefer OAuth client credentials (auto-refreshing 24h tokens).\nLeave both blank to fall back to a long-lived SHOPIFY_ADMIN_ACCESS_TOKEN.\n',
+      ),
+    )
+    const clientId = await ask('Shopify OAuth client ID (enter to skip): ')
+    const clientSecret = clientId ? await ask('Shopify OAuth client secret: ') : ''
+    const adminToken = clientId
+      ? ''
+      : await ask('Shopify Admin API access token (shpat_…): ')
     const storefrontToken = await ask('Shopify Storefront API access token: ')
     console.log(chalk.dim('\nAt least one scoring provider key is required.\n'))
     const perplexity = await ask('Perplexity API key (enter to skip): ')
@@ -52,11 +61,15 @@ program
     const anthropic = await ask('Anthropic API key (required for hypothesis + query generation): ')
     rl.close()
 
-    const lines = [
-      `SHOPIFY_STORE_DOMAIN=${domain}`,
-      `SHOPIFY_ADMIN_ACCESS_TOKEN=${adminToken}`,
-      `SHOPIFY_STOREFRONT_ACCESS_TOKEN=${storefrontToken}`,
-    ]
+    const lines = [`SHOPIFY_STORE_DOMAIN=${domain}`]
+    if (clientId) {
+      lines.push(`SHOPIFY_CLIENT_ID=${clientId}`)
+      lines.push(`SHOPIFY_CLIENT_SECRET=${clientSecret}`)
+    }
+    if (adminToken) {
+      lines.push(`SHOPIFY_ADMIN_ACCESS_TOKEN=${adminToken}`)
+    }
+    lines.push(`SHOPIFY_STOREFRONT_ACCESS_TOKEN=${storefrontToken}`)
     if (perplexity) lines.push(`PERPLEXITY_API_KEY=${perplexity}`)
     if (openai) lines.push(`OPENAI_API_KEY=${openai}`)
     if (anthropic) lines.push(`ANTHROPIC_API_KEY=${anthropic}`)
@@ -136,10 +149,21 @@ program
         return
       }
 
-      const admin = new ShopifyAdminClient({
-        storeDomain: config.store.domain,
-        accessToken: config.store.adminAccessToken,
-      })
+      const adminSpin = ora('Authenticating with Shopify Admin API').start()
+      let admin
+      try {
+        admin = await ShopifyAdminClient.create({
+          storeDomain: config.store.domain,
+          accessToken: config.store.adminAccessToken,
+          clientId: config.store.clientId,
+          clientSecret: config.store.clientSecret,
+        })
+        adminSpin.succeed('Authenticated')
+      } catch (err) {
+        adminSpin.fail(`Auth failed: ${errorMessage(err)}`)
+        process.exitCode = 1
+        return
+      }
       const fetchSpin = ora('Fetching products from Shopify Admin API').start()
       let products
       try {
@@ -321,9 +345,11 @@ queries
         process.exitCode = 1
         return
       }
-      const admin = new ShopifyAdminClient({
+      const admin = await ShopifyAdminClient.create({
         storeDomain: config.store.domain,
         accessToken: config.store.adminAccessToken,
+        clientId: config.store.clientId,
+        clientSecret: config.store.clientSecret,
       })
       const fetchSpin = ora('Fetching products').start()
       const products = await admin.listProducts()
