@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { nanoid } from 'nanoid'
 import { retry } from '../utils/retry.js'
+import { estimateCost } from '../utils/cost.js'
 import type { ShopifyProduct } from '../shopify/types.js'
 import type { Hypothesis, HypothesisLevel, HypothesisType } from './types.js'
 
@@ -75,6 +76,9 @@ export class HypothesisGenerator {
   private client: Anthropic
   private model: string
   private promptVersion: string
+  // Token cost of the most recent generate() call. Read by the loop after
+  // each call so it can charge the budget for hypothesis generation.
+  lastCostUsd = 0
 
   constructor(options: HypothesisGeneratorOptions) {
     this.client = new Anthropic({ apiKey: options.apiKey })
@@ -97,6 +101,11 @@ export class HypothesisGenerator {
         ),
       { attempts: 3, baseDelayMs: 1000 },
     )
+
+    this.lastCostUsd = estimateCost(`anthropic:${this.model}`, {
+      input: response.usage?.input_tokens ?? 0,
+      output: response.usage?.output_tokens ?? 0,
+    })
 
     const raw = extractText(response)
     const parsed = parseJsonObject(raw)

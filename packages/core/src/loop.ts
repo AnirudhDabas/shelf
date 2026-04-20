@@ -87,13 +87,16 @@ export async function runLoop(
   const budget = new BudgetTracker(config.loop.budgetLimitUsd)
 
   const products = deps.products ?? (await admin.listProducts())
-  const queries =
-    deps.queries ??
-    (await (deps.queryGenerator ?? new QueryGenerator({ apiKey: anthropicKey })).generate({
+  let queries = deps.queries
+  if (!queries) {
+    const queryGen = deps.queryGenerator ?? new QueryGenerator({ apiKey: anthropicKey })
+    queries = await queryGen.generate({
       products,
       count: deps.queryCount ?? DEFAULT_QUERY_COUNT,
       storeCategory: deps.storeCategory,
-    }))
+    })
+    budget.add(queryGen.lastCostUsd ?? 0)
+  }
 
   const startedAt = now()
   const baseline = await measureScore(queries, config.store.domain, providers, {
@@ -160,6 +163,7 @@ export async function runLoop(
         triedHypotheses: priorAttempts,
         storeCategory: deps.storeCategory,
       })
+      budget.add(generator.lastCostUsd ?? 0)
     } catch (err) {
       const errMsg = errorMessage(err)
       const stub = stubHypothesis(product)
