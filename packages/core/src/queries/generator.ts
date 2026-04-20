@@ -76,7 +76,10 @@ export class QueryGenerator {
         this.client.messages.create(
           {
             model: this.model,
-            max_tokens: 4096,
+            // ~80 tokens per query (text + 1-3 ids + intent + category) ×
+            // 50 queries comfortably blew through 4096 and produced a
+            // truncated JSON tail. 16384 leaves plenty of headroom.
+            max_tokens: 16384,
             system: SYSTEM_PROMPT,
             messages: [{ role: 'user', content: userPrompt }],
           },
@@ -91,6 +94,12 @@ export class QueryGenerator {
     })
 
     const raw = extractText(response)
+    if (response.stop_reason === 'max_tokens') {
+      throw new QueryValidationError(
+        `Query generation hit max_tokens (${response.usage?.output_tokens ?? '?'} output tokens) and was truncated. Lower the requested count or raise max_tokens.`,
+        raw,
+      )
+    }
     const parsed = parseJsonObject(raw)
     return buildQueries(parsed, input.products, count, raw)
   }
