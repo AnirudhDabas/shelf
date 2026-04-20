@@ -65,7 +65,7 @@ Next.js app on port 3000. Tails `shelf.jsonl` via SSE and renders the live score
 | `PERPLEXITY_API_KEY`               | Sonar scoring provider (optional, at least one scorer required)   |
 | `OPENAI_API_KEY`                   | OpenAI `web_search` scoring provider (optional)                   |
 | `ANTHROPIC_API_KEY`                | Required — powers hypothesis + query generation                   |
-| `SHELF_BUDGET_LIMIT_USD`           | Stop the loop when total estimated spend exceeds this (default 25)|
+| `SHELF_BUDGET_LIMIT_USD`           | Stop the loop when total estimated spend exceeds this (default 5) |
 | `SHELF_MAX_ITERATIONS`             | Hard cap on iterations (default 100)                              |
 | `SHELF_QUERIES_PER_MEASUREMENT`    | Query sample size per score measurement (default 3)               |
 | `SHELF_LOG_FILE`                   | Path for the jsonl experiment log (default `shelf.jsonl`)         |

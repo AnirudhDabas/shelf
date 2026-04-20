@@ -49,7 +49,7 @@ export class ConfigError extends Error {
 }
 
 const DEFAULT_MAX_ITERATIONS = 100
-const DEFAULT_BUDGET_USD = 25
+const DEFAULT_BUDGET_USD = 5
 const DEFAULT_REPETITIONS = 3
 const DEFAULT_LOG_FILE = 'shelf.jsonl'
 const DEFAULT_SESSION_FILE = 'shelf.md'

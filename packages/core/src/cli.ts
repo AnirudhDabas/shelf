@@ -481,8 +481,14 @@ function renderEvent(event: ShelfEvent): void {
       const delta = event.finalScore - event.baselineScore
       const sign = delta >= 0 ? '+' : ''
       const color = delta > 0 ? chalk.green : chalk.red
+      const spent = `$${event.totalCostUsd.toFixed(2)}`
+      if (event.stopReason === 'budget exhausted') {
+        console.log(
+          `${head} ${chalk.red.bold('🛑 BUDGET CAP HIT — stopping')}  spent ${chalk.red.bold(spent)} (limit reached). Raise SHELF_BUDGET_LIMIT_USD to continue.`,
+        )
+      }
       console.log(
-        `${head} ${chalk.bold('■ session end')}  ${event.baselineScore.toFixed(1)} → ${event.finalScore.toFixed(1)} (${color(sign + delta.toFixed(1))}) over ${event.totalIterations} iters · reason: ${event.stopReason}`,
+        `${head} ${chalk.bold('■ session end')}  ${event.baselineScore.toFixed(1)} → ${event.finalScore.toFixed(1)} (${color(sign + delta.toFixed(1))}) over ${event.totalIterations} iters · spent ${spent} · reason: ${event.stopReason}`,
       )
       break
     }
