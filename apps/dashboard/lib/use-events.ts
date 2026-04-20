@@ -24,18 +24,27 @@ export function useEvents(): EventsState {
   useEffect(() => {
     const source = new EventSource('/api/events')
 
+    // hello fires on every (re)connection. The server replays the full
+    // backlog afterwards, so we reset local state to avoid duplicates.
     source.addEventListener('hello', (ev) => {
+      let path: string | null = null
       try {
-        const payload = JSON.parse(ev.data) as { path?: string }
-        setState((prev) => ({ ...prev, connected: true, path: payload.path ?? null }))
+        const payload = JSON.parse((ev as MessageEvent).data) as { path?: string }
+        path = payload.path ?? null
       } catch {
-        setState((prev) => ({ ...prev, connected: true }))
+        // noop
       }
+      setState((prev) => ({
+        ...prev,
+        connected: true,
+        path: path ?? prev.path,
+        experiments: [],
+      }))
     })
 
     source.addEventListener('status', (ev) => {
       try {
-        const payload = JSON.parse(ev.data) as { waiting?: boolean }
+        const payload = JSON.parse((ev as MessageEvent).data) as { waiting?: boolean }
         setState((prev) => ({ ...prev, waitingForFile: payload.waiting === true }))
       } catch {
         // noop
@@ -48,12 +57,17 @@ export function useEvents(): EventsState {
 
     source.addEventListener('experiment', (ev) => {
       try {
-        const entry = JSON.parse(ev.data) as ExperimentLog
-        setState((prev) => ({
-          ...prev,
-          waitingForFile: false,
-          experiments: [...prev.experiments, entry],
-        }))
+        const entry = JSON.parse((ev as MessageEvent).data) as ExperimentLog
+        setState((prev) => {
+          // De-dupe by id in case of reconnect races — server replays the
+          // whole file on each new connection.
+          if (prev.experiments.some((e) => e.id === entry.id)) return prev
+          return {
+            ...prev,
+            waitingForFile: false,
+            experiments: [...prev.experiments, entry],
+          }
+        })
       } catch {
         // noop
       }

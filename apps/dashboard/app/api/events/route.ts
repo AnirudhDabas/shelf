@@ -1,11 +1,12 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, unwatchFile, watchFile } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import type { NextRequest } from 'next/server'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-const POLL_INTERVAL_MS = 500
+const HEARTBEAT_MS = 5_000
+const WATCH_INTERVAL_MS = 300
 
 function logPath(): string {
   const envPath = process.env.SHELF_LOG_FILE
@@ -37,7 +38,7 @@ export function GET(req: NextRequest): Response {
         }
       }
 
-      const flushNewLines = (chunk: string): void => {
+      const flushChunk = (chunk: string): void => {
         buffer += chunk
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
@@ -52,13 +53,13 @@ export function GET(req: NextRequest): Response {
         }
       }
 
-      const tick = (): void => {
+      const readFromCursor = (): void => {
         if (closed) return
+        if (!existsSync(file)) {
+          send('status', { waiting: true, path: file })
+          return
+        }
         try {
-          if (!existsSync(file)) {
-            send('status', { waiting: true, path: file })
-            return
-          }
           const size = statSync(file).size
           if (size < cursor) {
             cursor = 0
@@ -66,19 +67,26 @@ export function GET(req: NextRequest): Response {
             send('reset', { path: file })
           }
           if (size > cursor) {
-            const fd = readFileSync(file, 'utf-8')
-            const chunk = fd.slice(cursor)
+            const chunk = readFileSync(file, 'utf-8').slice(cursor)
             cursor = size
-            flushNewLines(chunk)
+            flushChunk(chunk)
           }
         } catch (err) {
           send('error', { message: err instanceof Error ? err.message : String(err) })
         }
       }
 
+      // Initial handshake — client uses this to (re)reset its experiment list.
       send('hello', { path: file, startedAt: new Date().toISOString() })
-      tick()
-      const interval = setInterval(tick, POLL_INTERVAL_MS)
+      // Emit the full existing backlog so late-joining clients see history.
+      readFromCursor()
+
+      // watchFile polls mtime/size and fires whenever the file changes.
+      // Works even if the file does not exist yet — the first write triggers curr.size > 0.
+      watchFile(file, { interval: WATCH_INTERVAL_MS }, () => {
+        readFromCursor()
+      })
+
       const heartbeat = setInterval(() => {
         if (closed) return
         try {
@@ -86,11 +94,11 @@ export function GET(req: NextRequest): Response {
         } catch {
           closed = true
         }
-      }, 15_000)
+      }, HEARTBEAT_MS)
 
       req.signal.addEventListener('abort', () => {
         closed = true
-        clearInterval(interval)
+        unwatchFile(file)
         clearInterval(heartbeat)
         try {
           controller.close()
