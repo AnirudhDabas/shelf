@@ -127,7 +127,7 @@ export class ShopifyAdminClient {
 
   constructor(options: AdminClientOptions) {
     this.storeDomain = options.storeDomain
-    this.apiVersion = options.apiVersion ?? '2025-01'
+    this.apiVersion = options.apiVersion ?? '2026-01'
     this.client = createAdminApiClient({
       storeDomain: this.storeDomain,
       accessToken: options.accessToken,

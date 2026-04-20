@@ -26,7 +26,7 @@ export class ShopifyStorefrontClient {
     this.client = createStorefrontApiClient({
       storeDomain: options.storeDomain,
       publicAccessToken: options.publicAccessToken,
-      apiVersion: options.apiVersion ?? '2025-01',
+      apiVersion: options.apiVersion ?? '2026-01',
     })
   }
 
