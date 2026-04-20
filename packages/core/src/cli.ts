@@ -235,7 +235,7 @@ program
   .description('Launch the Next.js dashboard that tails shelf.jsonl in real time.')
   .option('-p, --port <port>', 'Port to bind', '3000')
   .action((options: { port: string }) => {
-    const args = ['--filter', '@shelf/dashboard', 'dev', '--', '--port', options.port]
+    const args = ['--filter', '@shelf/dashboard', 'exec', 'next', 'dev', '--port', options.port]
     const child = spawn('pnpm', args, { stdio: 'inherit', shell: process.platform === 'win32' })
     child.on('exit', (code) => {
       process.exitCode = code ?? 0
