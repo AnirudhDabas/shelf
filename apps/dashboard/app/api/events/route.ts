@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import type { NextRequest } from 'next/server'
 
 export const dynamic = 'force-dynamic'
@@ -8,7 +8,12 @@ export const runtime = 'nodejs'
 const POLL_INTERVAL_MS = 500
 
 function logPath(): string {
-  return resolve(process.cwd(), process.env.SHELF_LOG_FILE ?? 'shelf.jsonl')
+  const envPath = process.env.SHELF_LOG_FILE
+  if (envPath && isAbsolute(envPath)) return envPath
+  // next dev runs with cwd=apps/dashboard. shelf.jsonl lives at the repo
+  // root (two up), which is where the CLI loop writes it.
+  const projectRoot = resolve(process.cwd(), '..', '..')
+  return resolve(projectRoot, envPath ?? 'shelf.jsonl')
 }
 
 export function GET(req: NextRequest): Response {
