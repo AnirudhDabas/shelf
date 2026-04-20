@@ -14,12 +14,10 @@ export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 const HEARTBEAT_MS = 5_000
-// fs.watch fires on native FS events (fast). watchFile polls as a fallback
-// in case the event is missed (some editors/platforms drop events).
-const WATCHFILE_INTERVAL_MS = 1_000
+// 500ms polling fallback — fires even if fs.watch silently drops events.
+const WATCHFILE_INTERVAL_MS = 500
 // ~2 KB of comment padding so the first chunk is big enough to clear any
 // response buffer between the route handler and the browser's EventSource.
-// Without this, early events can sit invisible for seconds on localhost dev.
 const INITIAL_PADDING = ':' + ' '.repeat(2048) + '\n\n'
 
 function logPath(): string {
@@ -34,18 +32,22 @@ function logPath(): string {
 export function GET(req: NextRequest): Response {
   const file = logPath()
   const encoder = new TextEncoder()
+  const connId = Math.random().toString(36).slice(2, 8)
 
   const stream = new ReadableStream({
     start(controller) {
       let cursor = 0
       let buffer = ''
       let closed = false
+      let fileWatcher: FSWatcher | null = null
+      let dirWatcher: FSWatcher | null = null
 
       const enqueue = (raw: string): void => {
         if (closed) return
         try {
           controller.enqueue(encoder.encode(raw))
-        } catch {
+        } catch (err) {
+          console.log(`[sse ${connId}] enqueue failed, closing: ${(err as Error).message}`)
           closed = true
         }
       }
@@ -58,18 +60,23 @@ export function GET(req: NextRequest): Response {
         buffer += chunk
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
+        let emitted = 0
         for (const line of lines) {
           const trimmed = line.trim()
           if (!trimmed) continue
           try {
             send('experiment', JSON.parse(trimmed))
+            emitted++
           } catch {
             // malformed line — skip
           }
         }
+        if (emitted > 0) {
+          console.log(`[sse ${connId}] emitted ${emitted} experiment event(s)`)
+        }
       }
 
-      const readFromCursor = (): void => {
+      const readFromCursor = (source: string): void => {
         if (closed) return
         if (!existsSync(file)) {
           send('status', { waiting: true, path: file })
@@ -78,44 +85,92 @@ export function GET(req: NextRequest): Response {
         try {
           const size = statSync(file).size
           if (size < cursor) {
+            console.log(`[sse ${connId}] ${source}: file truncated (${cursor} -> ${size}), resetting`)
             cursor = 0
             buffer = ''
             send('reset', { path: file })
           }
           if (size > cursor) {
+            const newBytes = size - cursor
+            console.log(`[sse ${connId}] ${source}: reading ${newBytes} new bytes (cursor ${cursor} -> ${size})`)
             const chunk = readFileSync(file, 'utf-8').slice(cursor)
             cursor = size
             flushChunk(chunk)
           }
         } catch (err) {
+          console.log(`[sse ${connId}] readFromCursor error: ${(err as Error).message}`)
           send('error', { message: err instanceof Error ? err.message : String(err) })
         }
       }
 
-      // Prime the connection: padding to defeat buffering, then hello, then
-      // the full existing backlog so late joiners see history.
-      enqueue(INITIAL_PADDING)
-      send('hello', { path: file, startedAt: new Date().toISOString() })
-      readFromCursor()
-
-      // Primary: native FS event (fires immediately on append).
-      // Watch the parent directory so we also catch the file being created
-      // for the first time in a fresh workspace.
-      let fsWatcher: FSWatcher | null = null
-      try {
-        fsWatcher = watch(dirname(file), (_event, changed) => {
-          if (changed && resolve(dirname(file), changed) === file) {
-            readFromCursor()
-          }
-        })
-      } catch {
-        fsWatcher = null
+      // Primary watcher: fs.watch on the file itself. Fires on every
+      // modification, no filename-filter guesswork. Detach/reattach via
+      // the dir watcher if the file is replaced (rename-write pattern).
+      const attachFileWatcher = (): void => {
+        if (fileWatcher || closed) return
+        if (!existsSync(file)) return
+        try {
+          fileWatcher = watch(file, { persistent: true }, (event) => {
+            console.log(`[sse ${connId}] fs.watch(file) fired: event=${event}`)
+            if (event === 'rename') {
+              // Some editors write via rename(tmp, target); the old fd is
+              // gone. Reattach on the next tick after confirming the file
+              // is back on disk.
+              try {
+                fileWatcher?.close()
+              } catch {
+                // ignore
+              }
+              fileWatcher = null
+              setTimeout(() => {
+                attachFileWatcher()
+                readFromCursor('fs.watch(file)/rename')
+              }, 50)
+              return
+            }
+            readFromCursor('fs.watch(file)')
+          })
+          fileWatcher.on('error', (err) => {
+            console.log(`[sse ${connId}] fs.watch(file) error: ${err.message}`)
+          })
+          console.log(`[sse ${connId}] attached fs.watch to ${file}`)
+        } catch (err) {
+          console.log(`[sse ${connId}] fs.watch(file) setup failed: ${(err as Error).message}`)
+          fileWatcher = null
+        }
       }
 
-      // Fallback: polling. Cheap, catches anything fs.watch misses.
-      watchFile(file, { interval: WATCHFILE_INTERVAL_MS }, () => {
-        readFromCursor()
+      // Dir watcher: catches the file being created for the first time.
+      // On any dir event we (re)attach the file watcher and re-read.
+      try {
+        dirWatcher = watch(dirname(file), { persistent: true }, (event, changed) => {
+          console.log(`[sse ${connId}] fs.watch(dir) fired: event=${event}, changed=${changed ?? '<null>'}`)
+          if (!fileWatcher) attachFileWatcher()
+          readFromCursor('fs.watch(dir)')
+        })
+        dirWatcher.on('error', (err) => {
+          console.log(`[sse ${connId}] fs.watch(dir) error: ${err.message}`)
+        })
+      } catch (err) {
+        console.log(`[sse ${connId}] fs.watch(dir) setup failed: ${(err as Error).message}`)
+        dirWatcher = null
+      }
+
+      // Polling fallback: keeps working even if both fs.watch handles
+      // silently stop firing (has happened on some Windows setups when
+      // the directory's security descriptor changes mid-stream).
+      watchFile(file, { interval: WATCHFILE_INTERVAL_MS, persistent: true }, (curr, prev) => {
+        if (curr.mtimeMs !== prev.mtimeMs || curr.size !== prev.size) {
+          console.log(`[sse ${connId}] watchFile fired: size ${prev.size} -> ${curr.size}`)
+          readFromCursor('watchFile')
+        }
       })
+
+      // Prime the connection: padding → hello → full backlog.
+      enqueue(INITIAL_PADDING)
+      send('hello', { path: file, startedAt: new Date().toISOString() })
+      readFromCursor('initial')
+      attachFileWatcher()
 
       const heartbeat = setInterval(() => {
         if (closed) return
@@ -123,14 +178,24 @@ export function GET(req: NextRequest): Response {
       }, HEARTBEAT_MS)
 
       req.signal.addEventListener('abort', () => {
+        console.log(`[sse ${connId}] client aborted, tearing down watchers`)
         closed = true
         unwatchFile(file)
-        if (fsWatcher) {
+        if (fileWatcher) {
           try {
-            fsWatcher.close()
+            fileWatcher.close()
           } catch {
             // already closed
           }
+          fileWatcher = null
+        }
+        if (dirWatcher) {
+          try {
+            dirWatcher.close()
+          } catch {
+            // already closed
+          }
+          dirWatcher = null
         }
         clearInterval(heartbeat)
         try {
@@ -139,6 +204,8 @@ export function GET(req: NextRequest): Response {
           // already closed
         }
       })
+
+      console.log(`[sse ${connId}] connection established, watching ${file}`)
     },
   })
 
@@ -147,8 +214,6 @@ export function GET(req: NextRequest): Response {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
-      // Tells Next.js / nginx / Vercel to stream bytes as they arrive
-      // instead of buffering the response.
       'X-Accel-Buffering': 'no',
     },
   })
