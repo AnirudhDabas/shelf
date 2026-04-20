@@ -10,14 +10,21 @@ export class HypothesisRevertError extends Error {
   }
 }
 
+export interface HypothesisReverterOptions {
+  dryRun?: boolean
+}
+
 export class HypothesisReverter {
   private admin: ShopifyAdminClient
+  private dryRun: boolean
 
-  constructor(admin: ShopifyAdminClient) {
+  constructor(admin: ShopifyAdminClient, options: HypothesisReverterOptions = {}) {
     this.admin = admin
+    this.dryRun = options.dryRun ?? false
   }
 
   async revert(applied: ApplyResult): Promise<RevertResult> {
+    if (this.dryRun) return revertDryRun(applied)
     switch (applied.type) {
       case 'title_rewrite':
         return this.revertTitle(applied)
@@ -154,4 +161,10 @@ function buildRevert(
     response,
     revertedAt: new Date().toISOString(),
   }
+}
+
+function revertDryRun(applied: ApplyResult): RevertResult {
+  const field = applied.changes[0]?.field ?? applied.type
+  console.log(`[dry-run] would revert ${applied.type} on ${applied.productId} (${field})`)
+  return buildRevert(applied, applied.changes.map(reverse), { dryRun: true })
 }

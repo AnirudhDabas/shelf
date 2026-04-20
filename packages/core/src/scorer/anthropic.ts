@@ -32,19 +32,16 @@ interface AnthropicMessageResponse {
 export interface AnthropicProviderOptions {
   apiKey: string
   cache?: FileCache
-  dryRun?: boolean
 }
 
 export class AnthropicScorer implements ScoringProvider {
   readonly name = 'anthropic' as const
   private client: Anthropic
   private cache?: FileCache
-  private dryRun: boolean
 
   constructor(options: AnthropicProviderOptions) {
     this.client = new Anthropic({ apiKey: options.apiKey })
     this.cache = options.cache
-    this.dryRun = options.dryRun ?? false
   }
 
   async score(query: ScoringQuery, storeDomain: string): Promise<ScoringResult> {
@@ -54,17 +51,6 @@ export class AnthropicScorer implements ScoringProvider {
 
     const cached = this.cache?.get<ScoringResult>(key)
     if (cached) return cached
-
-    if (this.dryRun) {
-      return {
-        queryId: query.id,
-        provider: 'anthropic',
-        appeared: false,
-        latencyMs: Date.now() - start,
-        costUsd: 0,
-        timestamp: new Date().toISOString(),
-      }
-    }
 
     const response = await retry(
       () =>

@@ -84,7 +84,8 @@ program
 program
   .command('run')
   .description('Run the autoresearch loop: generate hypotheses, apply, re-measure, keep or revert.')
-  .option('--dry-run', 'Skip live provider calls (uses cached or stub results)', false)
+  .option('--dry-run', 'Mock all external API calls (Anthropic, Perplexity, OpenAI) — zero cost, no writes', false)
+  .option('--no-shopify', 'With --dry-run, also skip Shopify Admin API calls (use fixture products)', false)
   .option('--max-iterations <n>', 'Override maxIterations from config', parseIntArg)
   .option('--budget <usd>', 'Override budget limit in USD', parseFloatArg)
   .option('--repetitions <n>', 'Queries repetitions per measurement', parseIntArg)
@@ -92,13 +93,21 @@ program
   .action(
     async (options: {
       dryRun: boolean
+      shopify: boolean
       maxIterations?: number
       budget?: number
       repetitions?: number
       storeCategory?: string
     }) => {
+      const noShopify = options.shopify === false
+      if (noShopify && !options.dryRun) {
+        console.error(chalk.red('✗ --no-shopify requires --dry-run (we only skip real Shopify in dry-run).'))
+        process.exitCode = 1
+        return
+      }
       const config = safeLoadConfig({
         dryRun: options.dryRun,
+        noShopify,
         maxIterations: options.maxIterations,
         budgetLimitUsd: options.budget,
         queriesPerMeasurement: options.repetitions,

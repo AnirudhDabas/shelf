@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { nanoid } from 'nanoid'
 import type { ShelfConfig } from './config.js'
 import { checkHypothesis } from './checks/backpressure.js'
@@ -19,6 +20,7 @@ import { SessionLogger } from './logger/session.js'
 import type { SessionState } from './logger/session.js'
 import { QueryGenerator } from './queries/generator.js'
 import { buildProviders, measureScore } from './scorer/index.js'
+import type { MockContext } from './scorer/mock.js'
 import type { AggregatedScore, ScoringProvider, ScoringQuery } from './scorer/types.js'
 import { ShopifyAdminClient } from './shopify/admin.js'
 import type { ShopifyProduct } from './shopify/types.js'
@@ -80,45 +82,61 @@ export async function runLoop(
   emitter: ShelfEventEmitter,
   deps: RunLoopDependencies = {},
 ): Promise<SessionState> {
-  const anthropicKey = requireAnthropicKey(config)
+  const anthropicKey = config.dryRun ? undefined : requireAnthropicKey(config)
   const now = deps.now ?? (() => Date.now())
   const sleepFn = deps.sleepMs ?? sleep
-  const propagationDelay = deps.propagationDelayMs ?? PROPAGATION_DELAY_MS
+  const propagationDelay = deps.propagationDelayMs ?? (config.dryRun ? 0 : PROPAGATION_DELAY_MS)
 
   const admin =
     deps.admin ??
-    (await ShopifyAdminClient.create({
-      storeDomain: config.store.domain,
-      accessToken: config.store.adminAccessToken,
-      clientId: config.store.clientId,
-      clientSecret: config.store.clientSecret,
-    }))
+    (config.noShopify
+      ? (undefined as unknown as ShopifyAdminClient)
+      : await ShopifyAdminClient.create({
+          storeDomain: config.store.domain,
+          accessToken: config.store.adminAccessToken,
+          clientId: config.store.clientId,
+          clientSecret: config.store.clientSecret,
+        }))
   const cache = deps.cache ?? new FileCache()
+  const mockCtx: MockContext = { iteration: 0 }
   const providers =
-    deps.providers ?? buildProviders(config, { cache, dryRun: config.dryRun })
+    deps.providers ??
+    buildProviders(config, { cache, dryRun: config.dryRun, mockContext: mockCtx })
   if (providers.length === 0) {
     throw new Error('runLoop: no scoring providers configured')
   }
   const generator =
-    deps.generator ?? new HypothesisGenerator({ apiKey: anthropicKey })
-  const applier = deps.applier ?? new HypothesisApplier(admin)
-  const reverter = deps.reverter ?? new HypothesisReverter(admin)
+    deps.generator ??
+    new HypothesisGenerator({ apiKey: anthropicKey, dryRun: config.dryRun })
+  const applier = deps.applier ?? new HypothesisApplier(admin, { dryRun: config.dryRun })
+  const reverter = deps.reverter ?? new HypothesisReverter(admin, { dryRun: config.dryRun })
   const sessionLogger = deps.sessionLogger ?? new SessionLogger(config.paths.sessionFile)
   const jsonl = deps.jsonl ?? new JsonlLogger(config.paths.logFile)
   const budget = new BudgetTracker(config.loop.budgetLimitUsd)
 
   let products = deps.products
   if (!products) {
-    logPhase('• fetching products from Shopify Admin API…')
-    products = await admin.listProducts()
+    if (config.noShopify) {
+      logPhase('• loading products from fixtures/demo-store/products.json (--no-shopify)…')
+      products = loadFixtureProducts()
+    } else {
+      logPhase('• fetching products from Shopify Admin API…')
+      products = await admin.listProducts()
+    }
     logPhase(`  → ${products.length} products`)
   }
 
   let queries = deps.queries
   if (!queries) {
     const targetCount = deps.queryCount ?? DEFAULT_QUERY_COUNT
-    logPhase(`• generating ${targetCount} shopper queries via Anthropic…`)
-    const queryGen = deps.queryGenerator ?? new QueryGenerator({ apiKey: anthropicKey })
+    if (config.dryRun) {
+      logPhase(`• loading ${targetCount} fixture queries (dry-run)…`)
+    } else {
+      logPhase(`• generating ${targetCount} shopper queries via Anthropic…`)
+    }
+    const queryGen =
+      deps.queryGenerator ??
+      new QueryGenerator({ apiKey: anthropicKey, dryRun: config.dryRun })
     queries = await queryGen.generate({
       products,
       count: targetCount,
@@ -170,6 +188,7 @@ export async function runLoop(
   let iteration = 0
 
   for (iteration = 1; iteration <= config.loop.maxIterations; iteration++) {
+    mockCtx.iteration = iteration
     if (budget.exhausted()) {
       stopReason = 'budget exhausted'
       break
@@ -646,6 +665,52 @@ function persistSession(
     currentScore,
     cumulativeCostUsd: budget.total(),
     elapsedMs: nowMs - startedAt,
+  })
+}
+
+interface FixtureProductSeed {
+  title: string
+  descriptionHtml: string
+  vendor?: string
+  productType?: string
+  tags?: string[]
+  price?: string
+  sizes?: string[]
+  image?: string
+}
+
+// Turn the tiny demo-store seed (title/description/vendor only) into
+// fully-shaped ShopifyProduct records for --no-shopify mode. Fabricates
+// stable GIDs so scorer/applier/reverter see the same shape they would
+// from a real Admin API response.
+function loadFixtureProducts(): ShopifyProduct[] {
+  const fixturePath = new URL(
+    '../../../fixtures/demo-store/products.json',
+    import.meta.url,
+  )
+  const raw = readFileSync(fixturePath, 'utf-8')
+  const seeds = JSON.parse(raw) as FixtureProductSeed[]
+  return seeds.map((s, i) => {
+    const id = `gid://shopify/Product/${1000000000000 + i}`
+    const variants = (s.sizes ?? ['default']).map((size, vi) => ({
+      id: `gid://shopify/ProductVariant/${2000000000000 + i * 100 + vi}`,
+      title: size,
+      price: s.price ?? '0.00',
+      availableForSale: true,
+      sku: null,
+    }))
+    return {
+      id,
+      title: s.title,
+      descriptionHtml: s.descriptionHtml,
+      productType: s.productType ?? null,
+      vendor: s.vendor ?? null,
+      tags: s.tags ?? [],
+      seo: { title: null, description: null },
+      metafields: [],
+      variants,
+      images: s.image ? [{ url: s.image, altText: null }] : [],
+    }
   })
 }
 

@@ -41,6 +41,7 @@ function makeConfig(overrides: Partial<ShelfConfig['loop']> = {}, paths?: ShelfC
     },
     paths: paths ?? { logFile: 'shelf.jsonl', sessionFile: 'shelf.md' },
     dryRun: false,
+    noShopify: false,
   }
 }
 

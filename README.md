@@ -74,10 +74,18 @@ Next.js app on port 3000. Tails `shelf.jsonl` via SSE and renders the live score
 ## Dry run
 
 ```bash
-npx shelf run --dry-run
+npx shelf run --dry-run                 # mock all AI calls, still read from Shopify
+npx shelf run --dry-run --no-shopify    # fully offline; read catalog from fixtures
 ```
 
-Re-scores the catalog from cached provider responses. No Shopify mutations, no scoring API cost, no log writes. Useful for reproducing a prior run or sanity-checking the scoring engine end-to-end.
+`--dry-run` stubs every external AI call (Anthropic, OpenAI, Perplexity) so the full loop — query generation, scoring, hypothesis proposal, apply, revert — runs end-to-end at `$0.00`:
+
+- **Queries** are loaded from [fixtures/demo-store/queries.json](fixtures/demo-store/queries.json) and round-robined onto the real product IDs fetched from your store.
+- **Scorer** returns a deterministic pseudo-random `appeared` verdict per `(query, iteration)`, seeded so all configured providers agree. Baseline hovers near 30 and drifts up ~1 point per iteration (capped at +40), enough to exercise the keep/revert logic.
+- **Hypothesis generator** returns a hardcoded `title_rewrite` (`Waterproof {type} — {title} | {vendor}`) so the applier and reverter run real code paths.
+- **Shopify writes** still hit the Admin API unless you also pass `--no-shopify`.
+
+Add `--no-shopify` to skip Shopify entirely: products are loaded from [fixtures/demo-store/products.json](fixtures/demo-store/products.json) with fabricated GIDs, and applier/reverter log `[dry-run] would apply ...` instead of calling the Admin API. This mode needs zero credentials — useful for smoke-testing a build or recording demo output.
 
 ## Hypothesis types
 

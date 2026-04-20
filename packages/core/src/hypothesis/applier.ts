@@ -11,14 +11,21 @@ export class HypothesisApplyError extends Error {
   }
 }
 
+export interface HypothesisApplierOptions {
+  dryRun?: boolean
+}
+
 export class HypothesisApplier {
   private admin: ShopifyAdminClient
+  private dryRun: boolean
 
-  constructor(admin: ShopifyAdminClient) {
+  constructor(admin: ShopifyAdminClient, options: HypothesisApplierOptions = {}) {
     this.admin = admin
+    this.dryRun = options.dryRun ?? false
   }
 
   async apply(h: Hypothesis, product: ShopifyProduct): Promise<ApplyResult> {
+    if (this.dryRun) return applyDryRun(h, product)
     switch (h.type) {
       case 'title_rewrite':
         return this.applyTitle(h, product)
@@ -155,4 +162,78 @@ function parseTags(raw: string): string[] {
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean)
+}
+
+function applyDryRun(h: Hypothesis, product: ShopifyProduct): ApplyResult {
+  console.log(
+    `[dry-run] would apply ${h.type} to ${product.id} (${product.title}): "${truncateValue(h.after)}"`,
+  )
+  const changes: FieldChange[] = [
+    change(fieldLabel(h), currentValue(h, product), h.after),
+  ]
+  const result: ApplyResult = {
+    hypothesisId: h.id,
+    type: h.type,
+    productId: product.id,
+    changes,
+    response: { dryRun: true },
+    appliedAt: new Date().toISOString(),
+  }
+  if (h.type === 'variant_title' && h.variantId) {
+    result.variantId = h.variantId
+  }
+  if ((h.type === 'metafield_add' || h.type === 'metafield_update') && h.metafieldNamespace) {
+    result.metafieldNamespace = h.metafieldNamespace
+    result.metafieldKey = h.metafieldKey
+    result.metafieldType = h.metafieldType
+  }
+  return result
+}
+
+function fieldLabel(h: Hypothesis): string {
+  switch (h.type) {
+    case 'title_rewrite':
+      return 'title'
+    case 'description_restructure':
+      return 'descriptionHtml'
+    case 'seo_title':
+      return 'seo.title'
+    case 'seo_description':
+      return 'seo.description'
+    case 'tags_update':
+      return 'tags'
+    case 'variant_title':
+      return `variants.${h.variantId}.title`
+    case 'metafield_add':
+    case 'metafield_update':
+      return `metafields.${h.metafieldNamespace}.${h.metafieldKey}`
+  }
+}
+
+function currentValue(h: Hypothesis, p: ShopifyProduct): string {
+  switch (h.type) {
+    case 'title_rewrite':
+      return p.title
+    case 'description_restructure':
+      return p.descriptionHtml
+    case 'seo_title':
+      return p.seo.title ?? ''
+    case 'seo_description':
+      return p.seo.description ?? ''
+    case 'tags_update':
+      return p.tags.join(', ')
+    case 'variant_title':
+      return p.variants.find((v) => v.id === h.variantId)?.title ?? ''
+    case 'metafield_add':
+    case 'metafield_update':
+      return (
+        p.metafields.find(
+          (m) => m.namespace === h.metafieldNamespace && m.key === h.metafieldKey,
+        )?.value ?? ''
+      )
+  }
+}
+
+function truncateValue(s: string): string {
+  return s.length <= 80 ? s : `${s.slice(0, 79)}…`
 }

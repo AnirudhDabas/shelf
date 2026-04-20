@@ -58,9 +58,10 @@ export interface GenerateHypothesisInput {
 }
 
 export interface HypothesisGeneratorOptions {
-  apiKey: string
+  apiKey?: string
   model?: string
   promptVersion?: string
+  dryRun?: boolean
 }
 
 export class HypothesisValidationError extends Error {
@@ -73,24 +74,36 @@ export class HypothesisValidationError extends Error {
 }
 
 export class HypothesisGenerator {
-  private client: Anthropic
+  private client?: Anthropic
   private model: string
   private promptVersion: string
+  private dryRun: boolean
   // Token cost of the most recent generate() call. Read by the loop after
   // each call so it can charge the budget for hypothesis generation.
   lastCostUsd = 0
 
   constructor(options: HypothesisGeneratorOptions) {
-    this.client = new Anthropic({ apiKey: options.apiKey })
+    this.dryRun = options.dryRun ?? false
+    if (!this.dryRun) {
+      if (!options.apiKey) {
+        throw new Error('HypothesisGenerator requires apiKey unless dryRun is true')
+      }
+      this.client = new Anthropic({ apiKey: options.apiKey })
+    }
     this.model = options.model ?? DEFAULT_MODEL
     this.promptVersion = options.promptVersion ?? HYPOTHESIS_PROMPT_VERSION
   }
 
   async generate(input: GenerateHypothesisInput): Promise<Hypothesis> {
+    if (this.dryRun) {
+      this.lastCostUsd = 0
+      return buildDryRunHypothesis(input.product, this.promptVersion)
+    }
     const userPrompt = buildUserPrompt(input)
+    const client = this.client!
     const response = await retry(
       () =>
-        this.client.messages.create(
+        client.messages.create(
           {
             model: this.model,
             max_tokens: 2048,
@@ -320,4 +333,26 @@ function buildHypothesis(
   }
 
   return hypothesis
+}
+
+function buildDryRunHypothesis(product: ShopifyProduct, promptVersion: string): Hypothesis {
+  const type = product.productType ?? 'Jacket'
+  const after = `Waterproof ${type} — ${product.title} | ${product.vendor ?? 'shelf'}`
+  return {
+    id: nanoid(),
+    type: 'title_rewrite',
+    productId: product.id,
+    productTitle: product.title,
+    field: 'title',
+    before: product.title,
+    after,
+    description: 'lead title with product category and waterproofing keyword',
+    reasoning: 'dry-run stub: shoppers search by category + attribute, not brand',
+    queryFailurePatterns: ['waterproof', 'category'],
+    predictedEffect: 'more matches on category + attribute queries',
+    riskLevel: 'low',
+    confidence: 'medium',
+    estimatedImpact: '+3',
+    promptVersion,
+  }
 }

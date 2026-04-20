@@ -1,6 +1,8 @@
 import { FileCache } from '../utils/cache.js'
 import type { ShelfConfig } from '../config.js'
 import { AnthropicScorer } from './anthropic.js'
+import { MockScorer } from './mock.js'
+import type { MockContext } from './mock.js'
 import { OpenAIScorer } from './openai.js'
 import { PerplexityScorer } from './perplexity.js'
 import type {
@@ -12,24 +14,38 @@ import type {
 } from './types.js'
 
 export * from './types.js'
-export { AnthropicScorer, OpenAIScorer, PerplexityScorer }
+export { AnthropicScorer, OpenAIScorer, PerplexityScorer, MockScorer }
+export type { MockContext }
 
 export interface BuildProvidersOptions {
   cache?: FileCache
   dryRun?: boolean
+  mockContext?: MockContext
 }
 
 export function buildProviders(
   config: ShelfConfig,
   options: BuildProvidersOptions = {},
 ): ScoringProvider[] {
+  if (options.dryRun) {
+    const ctx = options.mockContext ?? { iteration: 0 }
+    // Mirror whichever providers are configured; if none are set (common
+    // when running dry-run without any API keys), mock all three so the
+    // output looks like a full multi-provider run.
+    const names: ProviderName[] = []
+    if (config.providers.perplexity) names.push('perplexity')
+    if (config.providers.openai) names.push('openai')
+    if (config.providers.anthropic) names.push('anthropic')
+    if (names.length === 0) names.push('perplexity', 'openai', 'anthropic')
+    return names.map((n) => new MockScorer(n, ctx))
+  }
+
   const providers: ScoringProvider[] = []
   if (config.providers.perplexity) {
     providers.push(
       new PerplexityScorer({
         apiKey: config.providers.perplexity.apiKey,
         cache: options.cache,
-        dryRun: options.dryRun,
       }),
     )
   }
@@ -38,7 +54,6 @@ export function buildProviders(
       new OpenAIScorer({
         apiKey: config.providers.openai.apiKey,
         cache: options.cache,
-        dryRun: options.dryRun,
       }),
     )
   }
@@ -47,7 +62,6 @@ export function buildProviders(
       new AnthropicScorer({
         apiKey: config.providers.anthropic.apiKey,
         cache: options.cache,
-        dryRun: options.dryRun,
       }),
     )
   }

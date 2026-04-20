@@ -18,14 +18,12 @@ interface PerplexityResponse {
 export interface PerplexityProviderOptions {
   apiKey: string
   cache?: FileCache
-  dryRun?: boolean
 }
 
 export class PerplexityScorer implements ScoringProvider {
   readonly name = 'perplexity' as const
   private client: OpenAI
   private cache?: FileCache
-  private dryRun: boolean
 
   constructor(options: PerplexityProviderOptions) {
     this.client = new OpenAI({
@@ -33,7 +31,6 @@ export class PerplexityScorer implements ScoringProvider {
       baseURL: 'https://api.perplexity.ai',
     })
     this.cache = options.cache
-    this.dryRun = options.dryRun ?? false
   }
 
   async score(query: ScoringQuery, storeDomain: string): Promise<ScoringResult> {
@@ -43,10 +40,6 @@ export class PerplexityScorer implements ScoringProvider {
 
     const cached = this.cache?.get<ScoringResult>(key)
     if (cached) return cached
-
-    if (this.dryRun) {
-      return buildEmptyResult(query, 'perplexity', start)
-    }
 
     const completion = await retry(
       () =>
@@ -97,19 +90,4 @@ export class PerplexityScorer implements ScoringProvider {
 
 function buildPrompt(queryText: string): string {
   return `I'm shopping for: ${queryText}. What specific products would you recommend? Include the store URL where each product can be purchased.`
-}
-
-function buildEmptyResult(
-  query: ScoringQuery,
-  provider: 'perplexity',
-  start: number,
-): ScoringResult {
-  return {
-    queryId: query.id,
-    provider,
-    appeared: false,
-    latencyMs: Date.now() - start,
-    costUsd: 0,
-    timestamp: new Date().toISOString(),
-  }
 }

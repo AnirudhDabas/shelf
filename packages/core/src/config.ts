@@ -29,10 +29,12 @@ export interface ShelfConfig {
     sessionFile: string
   }
   dryRun: boolean
+  noShopify: boolean
 }
 
 export interface LoadConfigOverrides {
   dryRun?: boolean
+  noShopify?: boolean
   maxIterations?: number
   budgetLimitUsd?: number
   queriesPerMeasurement?: number
@@ -69,7 +71,10 @@ export function loadConfig(overrides: LoadConfigOverrides = {}): ShelfConfig {
     loadEnv()
   }
 
-  const domain = process.env.SHOPIFY_STORE_DOMAIN
+  const dryRun = overrides.dryRun ?? false
+  const noShopify = overrides.noShopify ?? false
+
+  const domain = process.env.SHOPIFY_STORE_DOMAIN ?? (noShopify ? 'dry-run.myshopify.com' : undefined)
   const adminAccessToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
   const clientId = process.env.SHOPIFY_CLIENT_ID
   const clientSecret = process.env.SHOPIFY_CLIENT_SECRET
@@ -78,7 +83,7 @@ export function loadConfig(overrides: LoadConfigOverrides = {}): ShelfConfig {
   if (!domain) {
     throw new ConfigError('SHOPIFY_STORE_DOMAIN is required. Run `shelf init` to set it up.')
   }
-  if (!(clientId && clientSecret) && !adminAccessToken) {
+  if (!noShopify && !(clientId && clientSecret) && !adminAccessToken) {
     throw new ConfigError(
       'Set SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET (recommended — auto-refreshing OAuth) or SHOPIFY_ADMIN_ACCESS_TOKEN.',
     )
@@ -95,7 +100,7 @@ export function loadConfig(overrides: LoadConfigOverrides = {}): ShelfConfig {
     providers.anthropic = { apiKey: process.env.ANTHROPIC_API_KEY }
   }
 
-  if (!providers.perplexity && !providers.openai && !providers.anthropic) {
+  if (!dryRun && !providers.perplexity && !providers.openai && !providers.anthropic) {
     throw new ConfigError(
       'At least one scoring provider API key is required (PERPLEXITY_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY).',
     )
@@ -126,6 +131,7 @@ export function loadConfig(overrides: LoadConfigOverrides = {}): ShelfConfig {
       sessionFile:
         overrides.sessionFile ?? process.env.SHELF_SESSION_FILE ?? DEFAULT_SESSION_FILE,
     },
-    dryRun: overrides.dryRun ?? false,
+    dryRun,
+    noShopify,
   }
 }

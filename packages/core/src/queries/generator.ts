@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import Anthropic from '@anthropic-ai/sdk'
 import { nanoid } from 'nanoid'
 import { retry } from '../utils/retry.js'
@@ -29,9 +30,10 @@ Return ONLY a JSON object (no markdown, no prose):
 Each query's targetProductIds should contain 1-3 product IDs.`
 
 export interface QueryGeneratorOptions {
-  apiKey: string
+  apiKey?: string
   model?: string
   promptVersion?: string
+  dryRun?: boolean
 }
 
 export interface GenerateQueriesInput {
@@ -50,15 +52,22 @@ export class QueryValidationError extends Error {
 }
 
 export class QueryGenerator {
-  private client: Anthropic
+  private client?: Anthropic
   private model: string
   private promptVersion: string
+  private dryRun: boolean
   // Token cost of the most recent generate() call. Read by the loop / CLI
   // after each call so it can charge the budget for query generation.
   lastCostUsd = 0
 
   constructor(options: QueryGeneratorOptions) {
-    this.client = new Anthropic({ apiKey: options.apiKey })
+    this.dryRun = options.dryRun ?? false
+    if (!this.dryRun) {
+      if (!options.apiKey) {
+        throw new Error('QueryGenerator requires apiKey unless dryRun is true')
+      }
+      this.client = new Anthropic({ apiKey: options.apiKey })
+    }
     this.model = options.model ?? DEFAULT_MODEL
     this.promptVersion = options.promptVersion ?? QUERIES_PROMPT_VERSION
   }
@@ -69,11 +78,16 @@ export class QueryGenerator {
 
   async generate(input: GenerateQueriesInput): Promise<ScoringQuery[]> {
     const count = input.count ?? DEFAULT_COUNT
+    if (this.dryRun) {
+      this.lastCostUsd = 0
+      return loadFixtureQueries(input.products, count)
+    }
     const userPrompt = buildUserPrompt(input.products, count, input.storeCategory)
+    const client = this.client!
 
     const response = await retry(
       () =>
-        this.client.messages.create(
+        client.messages.create(
           {
             model: this.model,
             // ~80 tokens per query (text + 1-3 ids + intent + category) ×
@@ -237,4 +251,49 @@ function buildQueries(
     )
   }
   return result.slice(0, expected)
+}
+
+interface FixtureQuery {
+  id?: string
+  text: string
+  category: string
+  intent: string
+  targetProductIds?: string[]
+}
+
+// Read the pre-generated demo queries from the repo fixture and re-home
+// their targetProductIds onto whatever products the caller actually has.
+// The fixture ships with targetProductIds: [] — it was authored before
+// any specific store existed — so we round-robin real GIDs across the
+// fixture entries so the loop's product-selection logic still has
+// targeted queries to work with.
+function loadFixtureQueries(products: ShopifyProduct[], count: number): ScoringQuery[] {
+  if (products.length === 0) {
+    throw new Error('loadFixtureQueries: at least one product is required to assign target IDs')
+  }
+  const fixturePath = new URL(
+    '../../../../fixtures/demo-store/queries.json',
+    import.meta.url,
+  )
+  const raw = readFileSync(fixturePath, 'utf-8')
+  const parsed = JSON.parse(raw) as FixtureQuery[]
+  const take = Math.min(count, parsed.length)
+  const out: ScoringQuery[] = []
+  for (let i = 0; i < take; i++) {
+    const src = parsed[i]
+    const intent = (VALID_INTENTS as readonly string[]).includes(src.intent)
+      ? (src.intent as QueryIntent)
+      : 'purchase'
+    // Round-robin one real product ID onto each fixture query so the
+    // loop sees a fully-targeted set.
+    const target = products[i % products.length].id
+    out.push({
+      id: src.id ?? nanoid(),
+      text: src.text,
+      category: src.category,
+      intent,
+      targetProductIds: [target],
+    })
+  }
+  return out
 }

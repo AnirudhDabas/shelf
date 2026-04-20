@@ -37,19 +37,16 @@ interface ResponsesApiResponse {
 export interface OpenAIProviderOptions {
   apiKey: string
   cache?: FileCache
-  dryRun?: boolean
 }
 
 export class OpenAIScorer implements ScoringProvider {
   readonly name = 'openai' as const
   private client: OpenAI
   private cache?: FileCache
-  private dryRun: boolean
 
   constructor(options: OpenAIProviderOptions) {
     this.client = new OpenAI({ apiKey: options.apiKey })
     this.cache = options.cache
-    this.dryRun = options.dryRun ?? false
   }
 
   async score(query: ScoringQuery, storeDomain: string): Promise<ScoringResult> {
@@ -59,17 +56,6 @@ export class OpenAIScorer implements ScoringProvider {
 
     const cached = this.cache?.get<ScoringResult>(key)
     if (cached) return cached
-
-    if (this.dryRun) {
-      return {
-        queryId: query.id,
-        provider: 'openai',
-        appeared: false,
-        latencyMs: Date.now() - start,
-        costUsd: 0,
-        timestamp: new Date().toISOString(),
-      }
-    }
 
     // We bypass the SDK's typed overloads because web_search is a recent tool
     // whose schema the installed openai types may not carry yet.
