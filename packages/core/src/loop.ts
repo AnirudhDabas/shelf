@@ -73,6 +73,7 @@ export interface RunLoopDependencies {
   sleepMs?: (ms: number) => Promise<void>
   now?: () => number
   propagationDelayMs?: number
+  iterationDelayMs?: number
   queryCount?: number
   storeCategory?: string
 }
@@ -86,6 +87,7 @@ export async function runLoop(
   const now = deps.now ?? (() => Date.now())
   const sleepFn = deps.sleepMs ?? sleep
   const propagationDelay = deps.propagationDelayMs ?? (config.dryRun ? 0 : PROPAGATION_DELAY_MS)
+  const iterationDelay = deps.iterationDelayMs ?? 0
 
   const admin =
     deps.admin ??
@@ -189,6 +191,9 @@ export async function runLoop(
 
   for (iteration = 1; iteration <= config.loop.maxIterations; iteration++) {
     mockCtx.iteration = iteration
+    if (iteration > 1 && iterationDelay > 0) {
+      await sleepFn(iterationDelay)
+    }
     if (budget.exhausted()) {
       stopReason = 'budget exhausted'
       break

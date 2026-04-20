@@ -89,6 +89,7 @@ program
   .option('--max-iterations <n>', 'Override maxIterations from config', parseIntArg)
   .option('--budget <usd>', 'Override budget limit in USD', parseFloatArg)
   .option('--repetitions <n>', 'Queries repetitions per measurement', parseIntArg)
+  .option('--delay <ms>', 'Artificial delay between iterations in ms (demo/recording aid)', parseIntArg, 0)
   .option('--store-category <label>', 'Category hint for hypothesis + query generation')
   .action(
     async (options: {
@@ -97,6 +98,7 @@ program
       maxIterations?: number
       budget?: number
       repetitions?: number
+      delay: number
       storeCategory?: string
     }) => {
       const noShopify = options.shopify === false
@@ -118,6 +120,7 @@ program
       try {
         const final = await runLoop(config, emitter, {
           storeCategory: options.storeCategory,
+          iterationDelayMs: options.delay,
         })
         console.log(
           chalk.bold(
