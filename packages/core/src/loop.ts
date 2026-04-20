@@ -34,6 +34,27 @@ const PLATEAU_THRESHOLD = 0.5
 const ALL_PRODUCTS_TARGET_SCORE = 90
 const BUDGET_WARN_FRACTION = 0.8
 const DEFAULT_QUERY_COUNT = 50
+// Baseline only samples a subset — per-iteration measurements still hit
+// the full set so keep/revert decisions stay statistically sound. Without
+// this, a 50q × 3p × 3r baseline meant 15+ minutes of dead air at startup.
+const BASELINE_QUERY_SAMPLE = 10
+
+function logPhase(msg: string): void {
+  process.stdout.write(`${msg}\n`)
+}
+
+function progressWriter(label: string, total: number): () => void {
+  let done = 0
+  return () => {
+    done++
+    if (process.stderr.isTTY) {
+      process.stderr.write(`\r  ${label}: ${done}/${total}`)
+      if (done === total) process.stderr.write('\n')
+    } else if (done === total || done % Math.max(1, Math.floor(total / 10)) === 0) {
+      process.stderr.write(`  ${label}: ${done}/${total}\n`)
+    }
+  }
+}
 
 export interface RunLoopDependencies {
   admin?: ShopifyAdminClient
@@ -86,23 +107,42 @@ export async function runLoop(
   const jsonl = deps.jsonl ?? new JsonlLogger(config.paths.logFile)
   const budget = new BudgetTracker(config.loop.budgetLimitUsd)
 
-  const products = deps.products ?? (await admin.listProducts())
+  let products = deps.products
+  if (!products) {
+    logPhase('• fetching products from Shopify Admin API…')
+    products = await admin.listProducts()
+    logPhase(`  → ${products.length} products`)
+  }
+
   let queries = deps.queries
   if (!queries) {
+    const targetCount = deps.queryCount ?? DEFAULT_QUERY_COUNT
+    logPhase(`• generating ${targetCount} shopper queries via Anthropic…`)
     const queryGen = deps.queryGenerator ?? new QueryGenerator({ apiKey: anthropicKey })
     queries = await queryGen.generate({
       products,
-      count: deps.queryCount ?? DEFAULT_QUERY_COUNT,
+      count: targetCount,
       storeCategory: deps.storeCategory,
     })
     budget.add(queryGen.lastCostUsd ?? 0)
+    logPhase(`  → ${queries.length} queries (cost $${(queryGen.lastCostUsd ?? 0).toFixed(3)})`)
   }
 
   const startedAt = now()
-  const baseline = await measureScore(queries, config.store.domain, providers, {
+  const baselineQueries = queries.slice(0, BASELINE_QUERY_SAMPLE)
+  logPhase(
+    `• measuring baseline: ${baselineQueries.length} queries × ${providers.length} providers × ${config.loop.queriesPerMeasurement} reps`,
+  )
+  const baselineTotal =
+    baselineQueries.length * providers.length * config.loop.queriesPerMeasurement
+  const baseline = await measureScore(baselineQueries, config.store.domain, providers, {
     repetitions: config.loop.queriesPerMeasurement,
+    onResult: progressWriter('baseline', baselineTotal),
   })
   budget.add(baseline.totalCostUsd)
+  logPhase(
+    `  → baseline ${baseline.overall.toFixed(1)}/100 (cost $${baseline.totalCostUsd.toFixed(2)})`,
+  )
 
   sessionLogger.start({ baselineScore: baseline.overall })
   emitter.emit({
@@ -293,10 +333,15 @@ export async function runLoop(
 
     await sleepFn(propagationDelay)
 
+    const iterTotal = queries.length * providers.length * config.loop.queriesPerMeasurement
+    logPhase(
+      `  iter ${iteration}: measuring ${queries.length} queries × ${providers.length} providers × ${config.loop.queriesPerMeasurement} reps`,
+    )
     let measurement: AggregatedScore
     try {
       measurement = await measureScore(queries, config.store.domain, providers, {
         repetitions: config.loop.queriesPerMeasurement,
+        onResult: progressWriter(`iter ${iteration}`, iterTotal),
       })
     } catch (err) {
       const errMsg = errorMessage(err)
