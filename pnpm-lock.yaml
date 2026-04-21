@@ -84,9 +84,6 @@ importers:
       '@shopify/admin-api-client':
         specifier: ^1.0.4
         version: 1.1.2
-      '@shopify/storefront-api-client':
-        specifier: ^1.0.3
-        version: 1.0.10
       chalk:
         specifier: ^5.3.0
         version: 5.6.2
@@ -834,9 +831,6 @@ packages:
 
   '@shopify/graphql-client@1.4.2':
     resolution: {integrity: sha512-C/fEyx6BZmTGeJv0HSsduhfn5ZbkXk0nePkyo0+xXxorP1I+uvx9pobdFxTfiPnOrh+P6QiKzBgIviksnSo4YA==}
-
-  '@shopify/storefront-api-client@1.0.10':
-    resolution: {integrity: sha512-A0ItFW58L5+y/jnnJDEsmt2YcQSt2BG+pNoQOYRpPBJaOLpTj7A13q1QVrE5XYVGZCA6ZQ6FqAtgosHHrkut0Q==}
 
   '@swc/helpers@0.5.15':
     resolution: {integrity: sha512-JQ5TuMi45Owi4/BIMAJBoSQoOJu12oOk/gADqlcUL9JEdHB8vyjUSsxqeNXnmXHjYKMi2WcYtezGEEhqUI/E2g==}
@@ -2681,10 +2675,6 @@ snapshots:
       '@shopify/graphql-client': 1.4.2
 
   '@shopify/graphql-client@1.4.2': {}
-
-  '@shopify/storefront-api-client@1.0.10':
-    dependencies:
-      '@shopify/graphql-client': 1.4.2
 
   '@swc/helpers@0.5.15':
     dependencies:
