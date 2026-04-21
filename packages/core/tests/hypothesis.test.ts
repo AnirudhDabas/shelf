@@ -108,18 +108,12 @@ describe('HypothesisGenerator.generate', () => {
     ).rejects.toThrow(/riskLevel/)
   })
 
-  it('requires variantId for variant_title and validates it exists on the product', async () => {
-    const noVariant = { ...validPayload, type: 'variant_title' }
-    const gen1 = makeGenerator(JSON.stringify(noVariant))
+  it('rejects variant_title as an unknown type now that it is removed', async () => {
+    const bad = { ...validPayload, type: 'variant_title' }
+    const gen = makeGenerator(JSON.stringify(bad))
     await expect(
-      gen1.generate({ product: product(), failedQueries: [], triedHypotheses: [] }),
-    ).rejects.toThrow(/variantId/)
-
-    const wrongVariant = { ...validPayload, type: 'variant_title', variantId: 'gid://shopify/ProductVariant/does-not-exist' }
-    const gen2 = makeGenerator(JSON.stringify(wrongVariant))
-    await expect(
-      gen2.generate({ product: product(), failedQueries: [], triedHypotheses: [] }),
-    ).rejects.toThrow(/does not exist/)
+      gen.generate({ product: product(), failedQueries: [], triedHypotheses: [] }),
+    ).rejects.toThrow(/Invalid hypothesis type/)
   })
 
   it('requires metafield namespace, key, and type for metafield_add', async () => {
@@ -130,11 +124,15 @@ describe('HypothesisGenerator.generate', () => {
     ).rejects.toThrow(/metafieldNamespace/)
   })
 
-  it('accepts variant_title when variantId matches an existing variant', async () => {
+  it('builds a hypothesis with required metafield fields when present', async () => {
     const good = {
       ...validPayload,
-      type: 'variant_title',
-      variantId: 'gid://shopify/ProductVariant/99',
+      type: 'metafield_add',
+      field: 'custom.waterproof_rating_mm',
+      after: '10000',
+      metafieldNamespace: 'custom',
+      metafieldKey: 'waterproof_rating_mm',
+      metafieldType: 'single_line_text_field',
     }
     const gen = makeGenerator(JSON.stringify(good))
     const result = await gen.generate({
@@ -142,6 +140,8 @@ describe('HypothesisGenerator.generate', () => {
       failedQueries: [],
       triedHypotheses: [],
     })
-    expect(result.variantId).toBe('gid://shopify/ProductVariant/99')
+    expect(result.metafieldNamespace).toBe('custom')
+    expect(result.metafieldKey).toBe('waterproof_rating_mm')
+    expect(result.metafieldType).toBe('single_line_text_field')
   })
 })

@@ -22,7 +22,6 @@ export type {
 } from './scorer/index.js'
 
 export { ShopifyAdminClient, fetchAccessToken } from './shopify/admin.js'
-export { ShopifyStorefrontClient } from './shopify/storefront.js'
 export type { ShopifyProduct, ShopifyVariant } from './shopify/types.js'
 
 export {

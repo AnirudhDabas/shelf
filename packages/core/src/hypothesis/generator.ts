@@ -29,7 +29,7 @@ RULES:
 OUTPUT FORMAT:
 Return ONLY a JSON object with this exact shape (no markdown, no prose):
 {
-  "type": "title_rewrite" | "description_restructure" | "metafield_add" | "metafield_update" | "seo_title" | "seo_description" | "tags_update" | "variant_title",
+  "type": "title_rewrite" | "description_restructure" | "metafield_add" | "metafield_update" | "seo_title" | "seo_description" | "tags_update",
   "field": string,
   "before": string,
   "after": string,
@@ -40,13 +40,11 @@ Return ONLY a JSON object with this exact shape (no markdown, no prose):
   "riskLevel": "low" | "medium" | "high",
   "confidence": "low" | "medium" | "high",
   "estimatedImpact": string,
-  "variantId"?: string,
   "metafieldNamespace"?: string,
   "metafieldKey"?: string,
   "metafieldType"?: string
 }
 
-For variant_title, variantId is REQUIRED and must match an existing variant GID from the product.
 For metafield_add and metafield_update, metafieldNamespace, metafieldKey, and metafieldType are REQUIRED.
 For tags_update, express "after" as a comma-separated list of the FULL tag set (not a diff).`
 
@@ -226,7 +224,6 @@ const VALID_TYPES: readonly HypothesisType[] = [
   'seo_title',
   'seo_description',
   'tags_update',
-  'variant_title',
 ]
 
 const VALID_LEVELS: readonly HypothesisLevel[] = ['low', 'medium', 'high']
@@ -302,23 +299,9 @@ function buildHypothesis(
     promptVersion,
   }
 
-  const variantId = optionalString(obj, 'variantId', raw)
   const metafieldNamespace = optionalString(obj, 'metafieldNamespace', raw)
   const metafieldKey = optionalString(obj, 'metafieldKey', raw)
   const metafieldType = optionalString(obj, 'metafieldType', raw)
-
-  if (type === 'variant_title') {
-    if (!variantId) {
-      throw new HypothesisValidationError('variant_title requires variantId', raw)
-    }
-    if (!product.variants.some((v) => v.id === variantId)) {
-      throw new HypothesisValidationError(
-        `variantId ${variantId} does not exist on product ${product.id}`,
-        raw,
-      )
-    }
-    hypothesis.variantId = variantId
-  }
 
   if (type === 'metafield_add' || type === 'metafield_update') {
     if (!metafieldNamespace || !metafieldKey || !metafieldType) {

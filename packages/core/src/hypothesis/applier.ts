@@ -40,8 +40,6 @@ export class HypothesisApplier {
       case 'metafield_add':
       case 'metafield_update':
         return this.applyMetafield(h, product)
-      case 'variant_title':
-        return this.applyVariantTitle(h, product)
     }
   }
 
@@ -110,31 +108,6 @@ export class HypothesisApplier {
     }
   }
 
-  private async applyVariantTitle(h: Hypothesis, p: ShopifyProduct): Promise<ApplyResult> {
-    if (!h.variantId) {
-      throw new HypothesisApplyError('variant_title hypothesis missing variantId', h.id)
-    }
-    const variant = p.variants.find((v) => v.id === h.variantId)
-    if (!variant) {
-      throw new HypothesisApplyError(
-        `variant ${h.variantId} not found on product ${p.id}`,
-        h.id,
-      )
-    }
-    const oldValue = variant.title
-    const response = await this.admin.updateVariants(p.id, [
-      { id: h.variantId, title: h.after },
-    ])
-    return {
-      hypothesisId: h.id,
-      type: h.type,
-      productId: p.id,
-      variantId: h.variantId,
-      changes: [change(`variants.${h.variantId}.title`, oldValue, h.after)],
-      response,
-      appliedAt: new Date().toISOString(),
-    }
-  }
 }
 
 function change(field: string, oldValue: string, newValue: string): FieldChange {
@@ -179,9 +152,6 @@ function applyDryRun(h: Hypothesis, product: ShopifyProduct): ApplyResult {
     response: { dryRun: true },
     appliedAt: new Date().toISOString(),
   }
-  if (h.type === 'variant_title' && h.variantId) {
-    result.variantId = h.variantId
-  }
   if ((h.type === 'metafield_add' || h.type === 'metafield_update') && h.metafieldNamespace) {
     result.metafieldNamespace = h.metafieldNamespace
     result.metafieldKey = h.metafieldKey
@@ -202,8 +172,6 @@ function fieldLabel(h: Hypothesis): string {
       return 'seo.description'
     case 'tags_update':
       return 'tags'
-    case 'variant_title':
-      return `variants.${h.variantId}.title`
     case 'metafield_add':
     case 'metafield_update':
       return `metafields.${h.metafieldNamespace}.${h.metafieldKey}`
@@ -222,8 +190,6 @@ function currentValue(h: Hypothesis, p: ShopifyProduct): string {
       return p.seo.description ?? ''
     case 'tags_update':
       return p.tags.join(', ')
-    case 'variant_title':
-      return p.variants.find((v) => v.id === h.variantId)?.title ?? ''
     case 'metafield_add':
     case 'metafield_update':
       return (

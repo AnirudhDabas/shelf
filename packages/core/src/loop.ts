@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { nanoid } from 'nanoid'
 import type { ShelfConfig } from './config.js'
 import { checkHypothesis } from './checks/backpressure.js'
@@ -41,10 +41,12 @@ const DEFAULT_QUERY_COUNT = 50
 // realistic per-iteration stand-in that matches what a live run roughly
 // costs ($0.08 × 25 iters ≈ $2). Only used when config.dryRun is true.
 const DRY_RUN_COST_PER_ITER = 0.08
-// Baseline only samples a subset — per-iteration measurements still hit
-// the full set so keep/revert decisions stay statistically sound. Without
-// this, a 50q × 3p × 3r baseline meant 15+ minutes of dead air at startup.
-const BASELINE_QUERY_SAMPLE = 10
+// Both the baseline and every per-iteration measurement sample the same
+// slice of queries. Using different sizes (e.g. 10 for baseline, full 50
+// per iteration) makes score deltas look smaller than they are because
+// they compare apples to oranges. Capped for latency: 50q × 3p × 3r at
+// baseline was 15+ minutes of dead air before the first hypothesis ran.
+const MEASUREMENT_QUERY_SAMPLE = 10
 
 function logPhase(msg: string): void {
   process.stdout.write(`${msg}\n`)
@@ -119,6 +121,12 @@ export async function runLoop(
   const reverter = deps.reverter ?? new HypothesisReverter(admin, { dryRun: config.dryRun })
   const sessionLogger = deps.sessionLogger ?? new SessionLogger(config.paths.sessionFile)
   const jsonl = deps.jsonl ?? new JsonlLogger(config.paths.logFile)
+  if (existsSync(jsonl.filePath) && statSync(jsonl.filePath).size > 0) {
+    logPhase(
+      `⚠ ${jsonl.filePath} already exists — truncating (previous run's experiments will be lost).`,
+    )
+  }
+  jsonl.reset()
   const budget = new BudgetTracker(config.loop.budgetLimitUsd)
 
   let products = deps.products
@@ -153,14 +161,19 @@ export async function runLoop(
     logPhase(`  → ${queries.length} queries (cost $${(queryGen.lastCostUsd ?? 0).toFixed(3)})`)
   }
 
+  // Both baseline and per-iteration measurements must score the same
+  // query set — otherwise score deltas are incomparable.
+  if (queries.length > MEASUREMENT_QUERY_SAMPLE) {
+    queries = queries.slice(0, MEASUREMENT_QUERY_SAMPLE)
+  }
+
   const startedAt = now()
-  const baselineQueries = queries.slice(0, BASELINE_QUERY_SAMPLE)
   logPhase(
-    `• measuring baseline: ${baselineQueries.length} queries × ${providers.length} providers × ${config.loop.queriesPerMeasurement} reps`,
+    `• measuring baseline: ${queries.length} queries × ${providers.length} providers × ${config.loop.queriesPerMeasurement} reps`,
   )
   const baselineTotal =
-    baselineQueries.length * providers.length * config.loop.queriesPerMeasurement
-  const baseline = await measureScore(baselineQueries, config.store.domain, providers, {
+    queries.length * providers.length * config.loop.queriesPerMeasurement
+  const baseline = await measureScore(queries, config.store.domain, providers, {
     repetitions: config.loop.queriesPerMeasurement,
     onResult: progressWriter('baseline', baselineTotal),
   })
@@ -246,7 +259,7 @@ export async function runLoop(
         buildLog({
           hypothesis: stub,
           iteration,
-          verdict: 'apply_failed',
+          verdict: 'generator_failed',
           scoreBefore: currentScore,
           scoreAfter: currentScore,
           scoreDelta: 0,
@@ -265,7 +278,7 @@ export async function runLoop(
         description: 'hypothesis generation failed',
         reason: `generator: ${errMsg}`,
       })
-      recentVerdicts.push('apply_failed')
+      recentVerdicts.push('generator_failed')
       persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
       continue
     }
@@ -381,8 +394,9 @@ export async function runLoop(
     } catch (err) {
       const errMsg = errorMessage(err)
       let revertError: string | undefined
+      let revertResult: RevertResult | undefined
       try {
-        await reverter.revert(applyResult)
+        revertResult = await reverter.revert(applyResult)
       } catch (revertErr) {
         revertError = errorMessage(revertErr)
       }
@@ -398,6 +412,7 @@ export async function runLoop(
         durationMs: now() - iterStart,
         costEstimateUsd: iterCost,
         applyResult,
+        revertResult,
         error: revertError ? `${errMsg}; revert failed: ${revertError}` : errMsg,
       })
       jsonl.append(log)
@@ -699,7 +714,7 @@ interface FixtureProductSeed {
 // fully-shaped ShopifyProduct records for --no-shopify mode. Fabricates
 // stable GIDs so scorer/applier/reverter see the same shape they would
 // from a real Admin API response.
-function loadFixtureProducts(): ShopifyProduct[] {
+export function loadFixtureProducts(): ShopifyProduct[] {
   const fixturePath = new URL(
     '../../../fixtures/demo-store/products.json',
     import.meta.url,

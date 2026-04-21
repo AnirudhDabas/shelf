@@ -89,12 +89,14 @@ export function checkHypothesis(
   const { title, description } = projectCorpus(hypothesis, product)
   const descText = stripHtml(description)
 
-  if (title.length < TITLE_MIN) {
-    failures.push(`title too short: ${title.length} chars (min ${TITLE_MIN})`)
-  } else if (title.length > TITLE_MAX) {
-    failures.push(`title too long: ${title.length} chars (max ${TITLE_MAX})`)
-  } else if (title.length > TITLE_WARN) {
-    warnings.push(`title is long: ${title.length} chars`)
+  if (hypothesis.type === 'title_rewrite') {
+    if (title.length < TITLE_MIN) {
+      failures.push(`title too short: ${title.length} chars (min ${TITLE_MIN})`)
+    } else if (title.length > TITLE_MAX) {
+      failures.push(`title too long: ${title.length} chars (max ${TITLE_MAX})`)
+    } else if (title.length > TITLE_WARN) {
+      warnings.push(`title is long: ${title.length} chars`)
+    }
   }
 
   if (descText.length < DESC_MIN) {

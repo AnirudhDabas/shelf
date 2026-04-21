@@ -5,9 +5,6 @@ import { resolve } from 'node:path'
 export interface ShelfConfig {
   store: {
     domain: string
-    // Optional — only needed for the Storefront MCP client. The core
-    // scoring + hypothesis loop runs against the Admin API alone.
-    storefrontAccessToken?: string
     // Either a long-lived shpat_ token...
     adminAccessToken?: string
     // ...or OAuth client credentials. When both are set, client credentials win.
@@ -78,7 +75,6 @@ export function loadConfig(overrides: LoadConfigOverrides = {}): ShelfConfig {
   const adminAccessToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
   const clientId = process.env.SHOPIFY_CLIENT_ID
   const clientSecret = process.env.SHOPIFY_CLIENT_SECRET
-  const storefrontAccessToken = process.env.SHOPIFY_STOREFRONT_ACCESS_TOKEN
 
   if (!domain) {
     throw new ConfigError('SHOPIFY_STORE_DOMAIN is required. Run `shelf init` to set it up.')
@@ -112,7 +108,6 @@ export function loadConfig(overrides: LoadConfigOverrides = {}): ShelfConfig {
       adminAccessToken,
       clientId,
       clientSecret,
-      storefrontAccessToken,
     },
     providers,
     loop: {

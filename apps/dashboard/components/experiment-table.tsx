@@ -11,6 +11,7 @@ const VERDICT_COLORS: Record<ExperimentLog['verdict'], string> = {
   kept_uncertain: 'bg-uncertain/15 text-uncertain border-uncertain/30',
   reverted: 'bg-reverted/15 text-reverted border-reverted/30',
   checks_failed: 'bg-text-secondary/15 text-text-secondary border-text-secondary/30',
+  generator_failed: 'bg-text-secondary/15 text-text-secondary border-text-secondary/30',
   apply_failed: 'bg-text-secondary/15 text-text-secondary border-text-secondary/30',
   measure_failed: 'bg-text-secondary/15 text-text-secondary border-text-secondary/30',
 }

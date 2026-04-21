@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createInterface } from 'node:readline/promises'
 import { stdin, stdout } from 'node:process'
 import { resolve } from 'node:path'
@@ -12,10 +12,11 @@ import { ConfigError, loadConfig } from './config.js'
 import { ShelfEventEmitter } from './events/emitter.js'
 import type { ShelfEvent } from './events/emitter.js'
 import { JsonlLogger } from './logger/jsonl.js'
-import { runLoop } from './loop.js'
+import { loadFixtureProducts, runLoop } from './loop.js'
 import { QueryGenerator } from './queries/generator.js'
 import { buildProviders, measureScore } from './scorer/index.js'
 import { ShopifyAdminClient } from './shopify/admin.js'
+import type { ShopifyProduct } from './shopify/types.js'
 import { FileCache } from './utils/cache.js'
 
 const program = new Command()
@@ -54,9 +55,6 @@ program
     const adminToken = clientId
       ? ''
       : await ask('Shopify Admin API access token (shpat_…): ')
-    const storefrontToken = await ask(
-      'Shopify Storefront API access token (enter to skip — not needed for the core loop): ',
-    )
     console.log(chalk.dim('\nAt least one scoring provider key is required.\n'))
     const perplexity = await ask('Perplexity API key (enter to skip): ')
     const openai = await ask('OpenAI API key (enter to skip): ')
@@ -70,9 +68,6 @@ program
     }
     if (adminToken) {
       lines.push(`SHOPIFY_ADMIN_ACCESS_TOKEN=${adminToken}`)
-    }
-    if (storefrontToken) {
-      lines.push(`SHOPIFY_STOREFRONT_ACCESS_TOKEN=${storefrontToken}`)
     }
     if (perplexity) lines.push(`PERPLEXITY_API_KEY=${perplexity}`)
     if (openai) lines.push(`OPENAI_API_KEY=${openai}`)
@@ -149,20 +144,32 @@ program
 program
   .command('score')
   .description('Run a one-shot baseline measurement against the current catalog without modifying anything.')
-  .option('--dry-run', 'Skip live provider calls', false)
+  .option('--dry-run', 'Mock all external API calls (Anthropic, Perplexity, OpenAI) — zero cost, no writes', false)
+  .option('--no-shopify', 'With --dry-run, also skip Shopify Admin API calls (use fixture products)', false)
   .option('--repetitions <n>', 'Queries repetitions per measurement', parseIntArg)
   .option('--query-count <n>', 'Number of queries to generate', parseIntArg, 50)
   .option('--store-category <label>', 'Category hint for query generation')
   .action(
     async (options: {
       dryRun: boolean
+      shopify: boolean
       repetitions?: number
       queryCount: number
       storeCategory?: string
     }) => {
-      const config = safeLoadConfig({ dryRun: options.dryRun, queriesPerMeasurement: options.repetitions })
+      const noShopify = options.shopify === false
+      if (noShopify && !options.dryRun) {
+        console.error(chalk.red('✗ --no-shopify requires --dry-run (we only skip real Shopify in dry-run).'))
+        process.exitCode = 1
+        return
+      }
+      const config = safeLoadConfig({
+        dryRun: options.dryRun,
+        noShopify,
+        queriesPerMeasurement: options.repetitions,
+      })
       const anthropicKey = config.providers.anthropic?.apiKey
-      if (!anthropicKey) {
+      if (!config.dryRun && !anthropicKey) {
         console.error(chalk.red('✗ ANTHROPIC_API_KEY required to generate queries.'))
         process.exitCode = 1
         return
@@ -175,36 +182,41 @@ program
         return
       }
 
-      const adminSpin = ora('Authenticating with Shopify Admin API').start()
-      let admin
-      try {
-        admin = await ShopifyAdminClient.create({
-          storeDomain: config.store.domain,
-          accessToken: config.store.adminAccessToken,
-          clientId: config.store.clientId,
-          clientSecret: config.store.clientSecret,
-        })
-        adminSpin.succeed('Authenticated')
-      } catch (err) {
-        adminSpin.fail(`Auth failed: ${errorMessage(err)}`)
-        process.exitCode = 1
-        return
-      }
-      const fetchSpin = ora('Fetching products from Shopify Admin API').start()
-      let products
-      try {
-        products = await admin.listProducts()
-        fetchSpin.succeed(`Fetched ${products.length} products`)
-      } catch (err) {
-        fetchSpin.fail(`Failed to fetch products: ${errorMessage(err)}`)
-        process.exitCode = 1
-        return
+      let products: ShopifyProduct[]
+      if (noShopify) {
+        products = loadFixtureProducts()
+        console.log(chalk.dim(`  → loaded ${products.length} fixture products (--no-shopify)`))
+      } else {
+        const adminSpin = ora('Authenticating with Shopify Admin API').start()
+        let admin
+        try {
+          admin = await ShopifyAdminClient.create({
+            storeDomain: config.store.domain,
+            accessToken: config.store.adminAccessToken,
+            clientId: config.store.clientId,
+            clientSecret: config.store.clientSecret,
+          })
+          adminSpin.succeed('Authenticated')
+        } catch (err) {
+          adminSpin.fail(`Auth failed: ${errorMessage(err)}`)
+          process.exitCode = 1
+          return
+        }
+        const fetchSpin = ora('Fetching products from Shopify Admin API').start()
+        try {
+          products = await admin.listProducts()
+          fetchSpin.succeed(`Fetched ${products.length} products`)
+        } catch (err) {
+          fetchSpin.fail(`Failed to fetch products: ${errorMessage(err)}`)
+          process.exitCode = 1
+          return
+        }
       }
 
       const querySpin = ora(`Generating ${options.queryCount} queries`).start()
       let queries
       try {
-        const generator = new QueryGenerator({ apiKey: anthropicKey })
+        const generator = new QueryGenerator({ apiKey: anthropicKey, dryRun: config.dryRun })
         queries = await generator.generate({
           products,
           count: options.queryCount,
@@ -262,21 +274,24 @@ program
 
 program
   .command('reset')
-  .description('Delete shelf.jsonl and shelf.md so the next run starts fresh.')
+  .description('Delete shelf.jsonl, shelf.md, and .shelf-cache/ so the next run starts fresh.')
   .option('-y, --yes', 'Skip confirmation prompt', false)
   .action(async (options: { yes: boolean }) => {
     const config = safeLoadConfig({})
     const logPath = resolve(process.cwd(), config.paths.logFile)
     const sessionPath = resolve(process.cwd(), config.paths.sessionFile)
-    const targets = [logPath, sessionPath].filter(existsSync)
-    if (targets.length === 0) {
-      console.log(chalk.dim('Nothing to reset — no shelf files found.'))
+    const cacheDir = resolve(process.cwd(), '.shelf-cache')
+    const files = [logPath, sessionPath].filter(existsSync)
+    const cacheExists = existsSync(cacheDir)
+    if (files.length === 0 && !cacheExists) {
+      console.log(chalk.dim('Nothing to reset — no shelf files or cache found.'))
       return
     }
+    const totalTargets = files.length + (cacheExists ? 1 : 0)
     if (!options.yes) {
       const rl = createInterface({ input: stdin, output: stdout })
       const confirm = (
-        await rl.question(chalk.yellow(`Delete ${targets.length} file(s)? [y/N] `))
+        await rl.question(chalk.yellow(`Delete ${totalTargets} target(s)? [y/N] `))
       ).trim()
       rl.close()
       if (confirm.toLowerCase() !== 'y') {
@@ -284,9 +299,13 @@ program
         return
       }
     }
-    for (const p of targets) {
+    for (const p of files) {
       unlinkSync(p)
       console.log(chalk.green(`✓ removed ${p}`))
+    }
+    if (cacheExists) {
+      rmSync(cacheDir, { recursive: true, force: true })
+      console.log(chalk.green(`✓ removed ${cacheDir}`))
     }
   })
 
@@ -300,7 +319,7 @@ program
     const jsonl = new JsonlLogger(config.paths.logFile)
     const logs = jsonl.readAll()
     if (logs.length === 0) {
-      console.log(chalk.dim('No experiments logged yet.'))
+      console.error(chalk.dim('No experiments logged yet.'))
       return
     }
     let output: string
@@ -349,7 +368,7 @@ program
     }
     if (options.out) {
       writeFileSync(resolve(process.cwd(), options.out), output, 'utf-8')
-      console.log(chalk.green(`✓ wrote ${logs.length} experiments to ${options.out}`))
+      console.error(chalk.green(`✓ wrote ${logs.length} experiments to ${options.out}`))
     } else {
       process.stdout.write(output)
     }
@@ -361,29 +380,50 @@ queries
   .description('Generate a fresh 50-query set from the current catalog and write to disk.')
   .option('-n, --count <n>', 'Number of queries', parseIntArg, 50)
   .option('-o, --out <path>', 'Output JSON path', 'shelf-queries.json')
+  .option('--dry-run', 'Mock Anthropic calls — zero cost, uses fixture queries', false)
+  .option('--no-shopify', 'With --dry-run, also skip Shopify Admin API calls (use fixture products)', false)
   .option('--store-category <label>', 'Category hint for query generation')
   .action(
-    async (options: { count: number; out: string; storeCategory?: string }) => {
-      const config = safeLoadConfig({})
+    async (options: {
+      count: number
+      out: string
+      dryRun: boolean
+      shopify: boolean
+      storeCategory?: string
+    }) => {
+      const noShopify = options.shopify === false
+      if (noShopify && !options.dryRun) {
+        console.error(chalk.red('✗ --no-shopify requires --dry-run (we only skip real Shopify in dry-run).'))
+        process.exitCode = 1
+        return
+      }
+      const config = safeLoadConfig({ dryRun: options.dryRun, noShopify })
       const anthropicKey = config.providers.anthropic?.apiKey
-      if (!anthropicKey) {
+      if (!config.dryRun && !anthropicKey) {
         console.error(chalk.red('✗ ANTHROPIC_API_KEY required to generate queries.'))
         process.exitCode = 1
         return
       }
-      const admin = await ShopifyAdminClient.create({
-        storeDomain: config.store.domain,
-        accessToken: config.store.adminAccessToken,
-        clientId: config.store.clientId,
-        clientSecret: config.store.clientSecret,
-      })
-      const fetchSpin = ora('Fetching products').start()
-      const products = await admin.listProducts()
-      fetchSpin.succeed(`Fetched ${products.length} products`)
+
+      let products: ShopifyProduct[]
+      if (noShopify) {
+        products = loadFixtureProducts()
+        console.log(chalk.dim(`  → loaded ${products.length} fixture products (--no-shopify)`))
+      } else {
+        const admin = await ShopifyAdminClient.create({
+          storeDomain: config.store.domain,
+          accessToken: config.store.adminAccessToken,
+          clientId: config.store.clientId,
+          clientSecret: config.store.clientSecret,
+        })
+        const fetchSpin = ora('Fetching products').start()
+        products = await admin.listProducts()
+        fetchSpin.succeed(`Fetched ${products.length} products`)
+      }
 
       const genSpin = ora(`Generating ${options.count} queries`).start()
       try {
-        const generator = new QueryGenerator({ apiKey: anthropicKey })
+        const generator = new QueryGenerator({ apiKey: anthropicKey, dryRun: config.dryRun })
         const result = await generator.generate({
           products,
           count: options.count,

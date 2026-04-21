@@ -40,8 +40,6 @@ export class HypothesisReverter {
         return this.revertMetafieldAdd(applied)
       case 'metafield_update':
         return this.revertMetafieldUpdate(applied)
-      case 'variant_title':
-        return this.revertVariantTitle(applied)
     }
   }
 
@@ -122,19 +120,6 @@ export class HypothesisReverter {
     return buildRevert(r, [reverse(ch)], response)
   }
 
-  private async revertVariantTitle(r: ApplyResult): Promise<RevertResult> {
-    if (!r.variantId) {
-      throw new HypothesisRevertError(
-        'variant_title revert missing variantId',
-        r.hypothesisId,
-      )
-    }
-    const ch = firstChange(r)
-    const response = await this.admin.updateVariants(r.productId, [
-      { id: r.variantId, title: ch.oldValue },
-    ])
-    return buildRevert(r, [reverse(ch)], response)
-  }
 }
 
 function firstChange(r: ApplyResult): FieldChange {

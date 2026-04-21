@@ -8,6 +8,7 @@ export type Verdict =
   | 'reverted'
   | 'kept_uncertain'
   | 'checks_failed'
+  | 'generator_failed'
   | 'apply_failed'
   | 'measure_failed'
 

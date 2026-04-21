@@ -52,6 +52,8 @@ Each (query, provider) pair is run three times — web-search responses are stoc
 
 Results are cached on disk by `{query, store}` for dry-run re-scoring without API cost.
 
+After each apply, live mode sleeps 8s before re-measuring so Shopify's storefront and CDN caches reflect the change. At 25 iterations that's ~3.3 minutes of pure wait time; dry-run skips it entirely.
+
 ## Dashboard
 
 ```bash
@@ -66,11 +68,10 @@ Next.js app on port 3000. Tails `shelf.jsonl` via SSE and renders the live score
 | ---------------------------------- | ----------------------------------------------------------------- |
 | `SHOPIFY_STORE_DOMAIN`             | `your-store.myshopify.com`                                        |
 | `SHOPIFY_ADMIN_ACCESS_TOKEN`       | Admin API token with `write_products` + `write_product_listings`  |
-| `SHOPIFY_STOREFRONT_ACCESS_TOKEN`  | Storefront token (used for grounding hypothesis generation)       |
 | `PERPLEXITY_API_KEY`               | Sonar scoring provider (optional, at least one scorer required)   |
 | `OPENAI_API_KEY`                   | OpenAI `web_search` scoring provider (optional)                   |
 | `ANTHROPIC_API_KEY`                | Required — powers hypothesis + query generation                   |
-| `SHELF_BUDGET_LIMIT_USD`           | Stop the loop when total estimated spend exceeds this (default 5) |
+| `SHELF_BUDGET_LIMIT_USD`           | Stop the loop when total estimated spend exceeds this (default 5 — roughly 5-10 real iterations depending on which scoring providers you enable; raise for longer runs) |
 | `SHELF_MAX_ITERATIONS`             | Hard cap on iterations (default 100)                              |
 | `SHELF_QUERIES_PER_MEASUREMENT`    | Query sample size per score measurement (default 3)               |
 | `SHELF_LOG_FILE`                   | Path for the jsonl experiment log (default `shelf.jsonl`)         |
@@ -103,18 +104,18 @@ Add `--no-shopify` to skip Shopify entirely: products are loaded from [fixtures/
 | `seo_title`                | Rewrite `<title>` for query intent                           |
 | `seo_description`          | Rewrite meta description with primary keywords               |
 | `tags_update`              | Add `waterproof`, `3-layer`, `pit-zips`                      |
-| `variant_title`            | `"Large"` → `"Large (42-44 in chest)"`                       |
 
 ## Backpressure checks
 
 Every hypothesis passes a local check pass before it hits Shopify:
 
-- Title length 10-70 characters.
-- Keyword density ≤ 3% (catches keyword stuffing).
-- Reading grade level 5-12 (Flesch-Kincaid).
-- No spammy prefixes (`BEST`, `#1`, `GUARANTEED`).
-- ALL CAPS ratio ≤ 10%.
-- Metafield values must be grounded in the existing product description.
+- Title length 10-255 characters (applies to `title_rewrite` only; warns above 100).
+- No keyword appears more than 3 times in title + description (catches keyword stuffing).
+- Description reading grade 5-12 (Flesch-Kincaid).
+- Title must not start with `buy`, `shop`, or `best`.
+- No ALL-CAPS word longer than 4 letters in the title (acronyms up to 4 characters are fine).
+- Description length 50-5000 chars after HTML stripping.
+- `metafield_add` / `metafield_update` values must be grounded in existing product data (at least one substantive token must appear somewhere in the product's title, description, tags, SEO fields, or existing metafields).
 
 Failed checks are logged with `verdict: "checks_failed"` without touching the store.
 
@@ -124,7 +125,7 @@ See [docs/optimization-trace-example.md](docs/optimization-trace-example.md) for
 
 ## Built with
 
-- Shopify Admin GraphQL API + Storefront API
+- Shopify Admin GraphQL API
 - Perplexity Sonar API
 - OpenAI Responses API with `web_search`
 - Anthropic Claude API with the `web_search` tool
@@ -132,7 +133,7 @@ See [docs/optimization-trace-example.md](docs/optimization-trace-example.md) for
 
 ## Why
 
-Shopify activated Agentic Storefronts for all merchants on 2026-03-24. 5.6M stores, 880M monthly AI users. Most stores are invisible because their product data isn't structured for machine consumption.
+Shopify activated Agentic Storefronts for all merchants on 2026-03-24. [5.6M stores](https://www.shopify.com/news/agentic-storefronts), and the [880M monthly AI users figure](https://openai.com/index/chatgpt-search) combines ChatGPT, Perplexity, and Gemini's public usage disclosures. Most stores are invisible because their product data isn't structured for machine consumption.
 
 This closes the loop.
 

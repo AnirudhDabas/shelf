@@ -30,7 +30,6 @@ function makeConfig(overrides: Partial<ShelfConfig['loop']> = {}, paths?: ShelfC
     store: {
       domain: 'example.myshopify.com',
       adminAccessToken: 'admin',
-      storefrontAccessToken: 'storefront',
     },
     providers: { anthropic: { apiKey: 'test-anthropic-key' } },
     loop: {
@@ -283,6 +282,39 @@ describe('runLoop', () => {
     expect(existsSync(paths.sessionFile)).toBe(true)
     const md = readFileSync(paths.sessionFile, 'utf-8')
     expect(md).toContain('budget exhausted')
+  })
+
+  it('records generator_failed when the hypothesis generator throws', async () => {
+    const paths = tmpPaths()
+    const config = makeConfig({ maxIterations: 1 }, paths)
+    const emitter = new ShelfEventEmitter()
+    const product = makeProduct()
+    const scorer = fakeScorer(false, false)
+    const failingGenerator = {
+      generate: vi.fn(async () => {
+        throw new Error('boom')
+      }),
+    } as unknown as HypothesisGenerator
+    const applier = fakeApplier(() => {})
+
+    await runLoop(config, emitter, {
+      admin: noopAdmin,
+      providers: [scorer.provider],
+      generator: failingGenerator,
+      applier,
+      reverter: fakeReverter(() => {}),
+      products: [product],
+      queries: [makeQuery('q1', product.id)],
+      sleepMs: async () => {},
+      propagationDelayMs: 0,
+      cache: new FileCache(mkdtempSync(join(tmpdir(), 'shelf-cache-'))),
+    })
+
+    expect(applier.apply).not.toHaveBeenCalled()
+    const logs = new JsonlLogger(paths.logFile).readAll()
+    const failed = logs.find((l) => l.verdict === 'generator_failed')
+    expect(failed).toBeDefined()
+    expect(failed?.error).toMatch(/boom/)
   })
 
   it('stops when maxIterations is hit without any product reaching the ceiling', async () => {

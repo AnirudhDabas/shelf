@@ -6,7 +6,6 @@ export type HypothesisType =
   | 'seo_title'
   | 'seo_description'
   | 'tags_update'
-  | 'variant_title'
 
 export type HypothesisLevel = 'low' | 'medium' | 'high'
 
@@ -26,7 +25,6 @@ export interface Hypothesis {
   confidence: HypothesisLevel
   estimatedImpact: string
   promptVersion: string
-  variantId?: string
   metafieldNamespace?: string
   metafieldKey?: string
   metafieldType?: string
@@ -42,7 +40,6 @@ export interface ApplyResult {
   hypothesisId: string
   type: HypothesisType
   productId: string
-  variantId?: string
   metafieldNamespace?: string
   metafieldKey?: string
   metafieldType?: string

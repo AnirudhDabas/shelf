@@ -55,6 +55,19 @@ describe('checkHypothesis', () => {
     expect(result.failures.some((f) => f.includes('title too long'))).toBe(true)
   })
 
+  it('does not apply the title-length check to non-title_rewrite hypotheses', () => {
+    // Seed a product with a title that would otherwise fail the title-length
+    // check, then propose a tags_update. The check should ignore the title.
+    const shortTitle = 'Short'
+    const hypothesis = baseHypothesis({
+      type: 'tags_update',
+      field: 'tags',
+      after: 'rain, jacket, outdoor, waterproof',
+    })
+    const result = checkHypothesis(hypothesis, baseProduct({ title: shortTitle }))
+    expect(result.failures.some((f) => f.includes('title too short'))).toBe(false)
+  })
+
   it('fails when a keyword appears more than three times in title + description', () => {
     const spammyTitle = 'waterproof waterproof waterproof waterproof jacket brand'
     const result = checkHypothesis(baseHypothesis({ after: spammyTitle }), baseProduct())

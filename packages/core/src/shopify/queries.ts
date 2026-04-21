@@ -102,21 +102,3 @@ export const GET_PRODUCT = `
   }
 `
 
-export const STOREFRONT_GET_PRODUCTS = `
-  query storefrontProducts($first: Int!) {
-    products(first: $first) {
-      edges {
-        node {
-          id
-          handle
-          title
-          description
-          productType
-          vendor
-          tags
-          onlineStoreUrl
-        }
-      }
-    }
-  }
-`
