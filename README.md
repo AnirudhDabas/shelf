@@ -24,10 +24,15 @@ The judges aren't heuristics. They're the actual AI agents shoppers use.
 ## Quick start
 
 ```bash
+git clone https://github.com/AnirudhDabas/shelf
+cd shelf
+pnpm install            # builds @shelf/core via the prepare hook
 npx shelf init          # interactive .env setup
 npx shelf run           # start the loop
 npx shelf dashboard     # live view at http://localhost:3000
 ```
+
+Requires Node ≥ 20 and pnpm ≥ 9. Try the loop without any API keys via `npx shelf run --dry-run --no-shopify`.
 
 ## The loop
 

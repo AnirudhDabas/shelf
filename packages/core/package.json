@@ -23,7 +23,8 @@
     "clean": "rm -rf dist .turbo",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepare": "tsc"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.1",
