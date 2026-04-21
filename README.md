@@ -27,12 +27,12 @@ The judges aren't heuristics. They're the actual AI agents shoppers use.
 git clone https://github.com/AnirudhDabas/shelf
 cd shelf
 pnpm install            # builds @shelf/core via the prepare hook
-npx shelf init          # interactive .env setup
-npx shelf run           # start the loop
-npx shelf dashboard     # live view at http://localhost:3000
+$ npx shelf-ai init     # interactive .env setup
+npx shelf-ai run        # start the loop
+npx shelf-ai dashboard  # live view at http://localhost:3000
 ```
 
-Requires Node ≥ 20 and pnpm ≥ 9. Try the loop without any API keys via `npx shelf run --dry-run --no-shopify`.
+Requires Node ≥ 20 and pnpm ≥ 9. Try the loop without any API keys via `npx shelf-ai run --dry-run --no-shopify`.
 
 ## The loop
 
@@ -57,7 +57,7 @@ After each apply, live mode sleeps 8s before re-measuring so Shopify's storefron
 ## Dashboard
 
 ```bash
-npx shelf dashboard
+npx shelf-ai dashboard
 ```
 
 Next.js app on port 3000. Tails `shelf.jsonl` via SSE and renders the live score, a progression chart, and the last 20 experiments with expandable before/after diffs. No websockets, no database — just a file tail.
@@ -80,8 +80,8 @@ Next.js app on port 3000. Tails `shelf.jsonl` via SSE and renders the live score
 ## Dry run
 
 ```bash
-npx shelf run --dry-run                 # mock all AI calls, still read from Shopify
-npx shelf run --dry-run --no-shopify    # fully offline; read catalog from fixtures
+npx shelf-ai run --dry-run                 # mock all AI calls, still read from Shopify
+npx shelf-ai run --dry-run --no-shopify    # fully offline; read catalog from fixtures
 ```
 
 `--dry-run` stubs every external AI call (Anthropic, OpenAI, Perplexity) so the full loop — query generation, scoring, hypothesis proposal, apply, revert — runs end-to-end at `$0.00`:

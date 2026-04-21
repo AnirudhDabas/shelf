@@ -846,8 +846,8 @@ It isn't showing up.
 ## Quick start
 
 \`\`\`bash
-npx shelf init
-npx shelf run
+npx shelf-ai init
+npx shelf-ai run
 \`\`\`
 
 ## The loop
@@ -864,7 +864,7 @@ npx shelf run
 ## Dashboard
 
 \`\`\`bash
-npx shelf dashboard
+npx shelf-ai dashboard
 \`\`\`
 
 [screenshot of dashboard]
@@ -876,7 +876,7 @@ npx shelf dashboard
 ## Dry run
 
 \`\`\`bash
-npx shelf run --dry-run
+npx shelf-ai run --dry-run
 \`\`\`
 
 [explanation: uses cached responses, no API costs, no store modifications]
