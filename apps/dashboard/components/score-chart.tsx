@@ -47,6 +47,13 @@ export function ScoreChart({ experiments }: ScoreChartProps) {
   const revertedData = data.filter((d) => d.verdict === 'reverted')
   const uncertainData = data.filter((d) => d.verdict === 'kept_uncertain')
 
+  // With three scatters + one line, a category X axis lists each series'
+  // iteration values in sequence and repeats (e.g. "1 2 5 … 1 2 5 …").
+  // Force a numeric axis with explicit integer ticks so labels stay
+  // monotonic and de-duped.
+  const maxIteration = Math.max(25, ...data.map((d) => d.iteration))
+  const ticks = Array.from({ length: maxIteration }, (_, i) => i + 1)
+
   return (
     <section className="border-b border-border bg-surface px-6 py-5">
       <header className="mb-4 flex items-baseline justify-between">
@@ -63,6 +70,12 @@ export function ScoreChart({ experiments }: ScoreChartProps) {
             <CartesianGrid stroke={COLOR_GRID} vertical={false} />
             <XAxis
               dataKey="iteration"
+              type="number"
+              domain={[1, maxIteration]}
+              ticks={ticks}
+              allowDecimals={false}
+              allowDuplicatedCategory={false}
+              interval={0}
               stroke={COLOR_AXIS}
               tick={{ fill: COLOR_AXIS, fontSize: 11, fontFamily: 'var(--font-jetbrains)' }}
               tickLine={false}

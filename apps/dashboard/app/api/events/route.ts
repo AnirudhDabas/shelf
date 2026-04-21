@@ -1,32 +1,50 @@
 import {
+  closeSync,
   existsSync,
+  openSync,
   readFileSync,
+  readSync,
   statSync,
-  unwatchFile,
-  watch,
-  watchFile,
 } from 'node:fs'
-import type { FSWatcher } from 'node:fs'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
+import { Buffer } from 'node:buffer'
 import type { NextRequest } from 'next/server'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 const HEARTBEAT_MS = 5_000
-// 500ms polling fallback — fires even if fs.watch silently drops events.
-const WATCHFILE_INTERVAL_MS = 500
+// fs.watch / watchFile both proved unreliable here (events either silently
+// dropped mid-stream or only fired on the next unrelated fs op). Straight
+// polling at 500ms is simpler and actually detects appends live.
+const POLL_INTERVAL_MS = 500
 // ~2 KB of comment padding so the first chunk is big enough to clear any
 // response buffer between the route handler and the browser's EventSource.
 const INITIAL_PADDING = ':' + ' '.repeat(2048) + '\n\n'
 
+function projectRoot(): string {
+  // next dev runs with cwd=apps/dashboard. Everything the CLI writes
+  // (shelf.jsonl, .shelf-cache/) lives two dirs up at the repo root.
+  return resolve(process.cwd(), '..', '..')
+}
+
 function logPath(): string {
   const envPath = process.env.SHELF_LOG_FILE
   if (envPath && isAbsolute(envPath)) return envPath
-  // next dev runs with cwd=apps/dashboard. shelf.jsonl lives at the repo
-  // root (two up), which is where the CLI loop writes it.
-  const projectRoot = resolve(process.cwd(), '..', '..')
-  return resolve(projectRoot, envPath ?? 'shelf.jsonl')
+  return resolve(projectRoot(), envPath ?? 'shelf.jsonl')
+}
+
+function readElapsedMultiplier(): number {
+  const envVal = Number.parseFloat(process.env.SHELF_ELAPSED_MULTIPLIER ?? '')
+  if (Number.isFinite(envVal) && envVal > 0) return envVal
+  try {
+    const raw = readFileSync(resolve(projectRoot(), '.shelf-cache', 'elapsed-multiplier'), 'utf-8').trim()
+    const n = Number.parseFloat(raw)
+    if (Number.isFinite(n) && n > 0) return n
+  } catch {
+    // sidecar absent — no fake elapsed
+  }
+  return 1
 }
 
 export function GET(req: NextRequest): Response {
@@ -36,11 +54,9 @@ export function GET(req: NextRequest): Response {
 
   const stream = new ReadableStream({
     start(controller) {
-      let cursor = 0
+      let lastSize = 0
       let buffer = ''
       let closed = false
-      let fileWatcher: FSWatcher | null = null
-      let dirWatcher: FSWatcher | null = null
 
       const enqueue = (raw: string): void => {
         if (closed) return
@@ -76,7 +92,7 @@ export function GET(req: NextRequest): Response {
         }
       }
 
-      const readFromCursor = (source: string): void => {
+      const readNewBytes = (source: string): void => {
         if (closed) return
         if (!existsSync(file)) {
           send('status', { waiting: true, path: file })
@@ -84,93 +100,43 @@ export function GET(req: NextRequest): Response {
         }
         try {
           const size = statSync(file).size
-          if (size < cursor) {
-            console.log(`[sse ${connId}] ${source}: file truncated (${cursor} -> ${size}), resetting`)
-            cursor = 0
+          if (size < lastSize) {
+            console.log(`[sse ${connId}] ${source}: file truncated (${lastSize} -> ${size}), resetting`)
+            lastSize = 0
             buffer = ''
             send('reset', { path: file })
           }
-          if (size > cursor) {
-            const newBytes = size - cursor
-            console.log(`[sse ${connId}] ${source}: reading ${newBytes} new bytes (cursor ${cursor} -> ${size})`)
-            const chunk = readFileSync(file, 'utf-8').slice(cursor)
-            cursor = size
-            flushChunk(chunk)
+          if (size > lastSize) {
+            const newBytes = size - lastSize
+            console.log(`[sse ${connId}] ${source}: reading ${newBytes} new bytes (cursor ${lastSize} -> ${size})`)
+            const fd = openSync(file, 'r')
+            const buf = Buffer.alloc(newBytes)
+            readSync(fd, buf, 0, newBytes, lastSize)
+            closeSync(fd)
+            lastSize = size
+            flushChunk(buf.toString('utf-8'))
           }
         } catch (err) {
-          console.log(`[sse ${connId}] readFromCursor error: ${(err as Error).message}`)
+          console.log(`[sse ${connId}] readNewBytes error: ${(err as Error).message}`)
           send('error', { message: err instanceof Error ? err.message : String(err) })
         }
       }
 
-      // Primary watcher: fs.watch on the file itself. Fires on every
-      // modification, no filename-filter guesswork. Detach/reattach via
-      // the dir watcher if the file is replaced (rename-write pattern).
-      const attachFileWatcher = (): void => {
-        if (fileWatcher || closed) return
-        if (!existsSync(file)) return
-        try {
-          fileWatcher = watch(file, { persistent: true }, (event) => {
-            console.log(`[sse ${connId}] fs.watch(file) fired: event=${event}`)
-            if (event === 'rename') {
-              // Some editors write via rename(tmp, target); the old fd is
-              // gone. Reattach on the next tick after confirming the file
-              // is back on disk.
-              try {
-                fileWatcher?.close()
-              } catch {
-                // ignore
-              }
-              fileWatcher = null
-              setTimeout(() => {
-                attachFileWatcher()
-                readFromCursor('fs.watch(file)/rename')
-              }, 50)
-              return
-            }
-            readFromCursor('fs.watch(file)')
-          })
-          fileWatcher.on('error', (err) => {
-            console.log(`[sse ${connId}] fs.watch(file) error: ${err.message}`)
-          })
-          console.log(`[sse ${connId}] attached fs.watch to ${file}`)
-        } catch (err) {
-          console.log(`[sse ${connId}] fs.watch(file) setup failed: ${(err as Error).message}`)
-          fileWatcher = null
-        }
-      }
-
-      // Dir watcher: catches the file being created for the first time.
-      // On any dir event we (re)attach the file watcher and re-read.
-      try {
-        dirWatcher = watch(dirname(file), { persistent: true }, (event, changed) => {
-          console.log(`[sse ${connId}] fs.watch(dir) fired: event=${event}, changed=${changed ?? '<null>'}`)
-          if (!fileWatcher) attachFileWatcher()
-          readFromCursor('fs.watch(dir)')
-        })
-        dirWatcher.on('error', (err) => {
-          console.log(`[sse ${connId}] fs.watch(dir) error: ${err.message}`)
-        })
-      } catch (err) {
-        console.log(`[sse ${connId}] fs.watch(dir) setup failed: ${(err as Error).message}`)
-        dirWatcher = null
-      }
-
-      // Polling fallback: keeps working even if both fs.watch handles
-      // silently stop firing (has happened on some Windows setups when
-      // the directory's security descriptor changes mid-stream).
-      watchFile(file, { interval: WATCHFILE_INTERVAL_MS, persistent: true }, (curr, prev) => {
-        if (curr.mtimeMs !== prev.mtimeMs || curr.size !== prev.size) {
-          console.log(`[sse ${connId}] watchFile fired: size ${prev.size} -> ${curr.size}`)
-          readFromCursor('watchFile')
-        }
-      })
-
       // Prime the connection: padding → hello → full backlog.
       enqueue(INITIAL_PADDING)
-      send('hello', { path: file, startedAt: new Date().toISOString() })
-      readFromCursor('initial')
-      attachFileWatcher()
+      send('hello', {
+        path: file,
+        startedAt: new Date().toISOString(),
+        elapsedMultiplier: readElapsedMultiplier(),
+      })
+      readNewBytes('initial')
+
+      // fs.watch / watchFile both failed to fire on appends mid-stream in
+      // this setup. Plain setInterval polling is reliable.
+      const poll = setInterval(() => {
+        if (closed) return
+        readNewBytes('poll')
+      }, POLL_INTERVAL_MS)
 
       const heartbeat = setInterval(() => {
         if (closed) return
@@ -178,25 +144,9 @@ export function GET(req: NextRequest): Response {
       }, HEARTBEAT_MS)
 
       req.signal.addEventListener('abort', () => {
-        console.log(`[sse ${connId}] client aborted, tearing down watchers`)
+        console.log(`[sse ${connId}] client aborted, clearing poll + heartbeat`)
         closed = true
-        unwatchFile(file)
-        if (fileWatcher) {
-          try {
-            fileWatcher.close()
-          } catch {
-            // already closed
-          }
-          fileWatcher = null
-        }
-        if (dirWatcher) {
-          try {
-            dirWatcher.close()
-          } catch {
-            // already closed
-          }
-          dirWatcher = null
-        }
+        clearInterval(poll)
         clearInterval(heartbeat)
         try {
           controller.close()
@@ -205,7 +155,7 @@ export function GET(req: NextRequest): Response {
         }
       })
 
-      console.log(`[sse ${connId}] connection established, watching ${file}`)
+      console.log(`[sse ${connId}] connection established, polling ${file} every ${POLL_INTERVAL_MS}ms`)
     },
   })
 

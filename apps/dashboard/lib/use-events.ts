@@ -7,6 +7,7 @@ export interface EventsState {
   waitingForFile: boolean
   connected: boolean
   path: string | null
+  elapsedMultiplier: number
 }
 
 // SSE subscriber — tails the /api/events stream and accumulates experiments
@@ -19,6 +20,7 @@ export function useEvents(): EventsState {
     waitingForFile: true,
     connected: false,
     path: null,
+    elapsedMultiplier: 1,
   })
 
   useEffect(() => {
@@ -28,9 +30,16 @@ export function useEvents(): EventsState {
     // backlog afterwards, so we reset local state to avoid duplicates.
     source.addEventListener('hello', (ev) => {
       let path: string | null = null
+      let elapsedMultiplier = 1
       try {
-        const payload = JSON.parse((ev as MessageEvent).data) as { path?: string }
+        const payload = JSON.parse((ev as MessageEvent).data) as {
+          path?: string
+          elapsedMultiplier?: number
+        }
         path = payload.path ?? null
+        if (typeof payload.elapsedMultiplier === 'number' && payload.elapsedMultiplier > 0) {
+          elapsedMultiplier = payload.elapsedMultiplier
+        }
       } catch {
         // noop
       }
@@ -38,6 +47,7 @@ export function useEvents(): EventsState {
         ...prev,
         connected: true,
         path: path ?? prev.path,
+        elapsedMultiplier,
         experiments: [],
       }))
     })

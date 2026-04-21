@@ -5,9 +5,10 @@ import type { ExperimentLog } from '@shelf/core'
 interface StatusBarProps {
   experiments: ExperimentLog[]
   startedAt: string | null
+  elapsedMultiplier?: number
 }
 
-export function StatusBar({ experiments, startedAt }: StatusBarProps) {
+export function StatusBar({ experiments, startedAt, elapsedMultiplier = 1 }: StatusBarProps) {
   const baseline = experiments[0]?.scoreBefore ?? 0
   const current = lastKeptScore(experiments) ?? baseline
   const delta = current - baseline
@@ -19,7 +20,7 @@ export function StatusBar({ experiments, startedAt }: StatusBarProps) {
       .map((e) => e.hypothesis.productId),
   ).size
 
-  const elapsed = useElapsed(startedAt)
+  const elapsed = useElapsed(startedAt, elapsedMultiplier)
   const pulse = usePulseOnKeep(experiments)
 
   return (
@@ -70,7 +71,7 @@ function lastKeptScore(entries: ExperimentLog[]): number | null {
   return null
 }
 
-function useElapsed(startedAt: string | null): string {
+function useElapsed(startedAt: string | null, multiplier = 1): string {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000)
@@ -78,7 +79,8 @@ function useElapsed(startedAt: string | null): string {
   }, [])
   if (!startedAt) return '—'
   const start = new Date(startedAt).getTime()
-  const totalSeconds = Math.max(0, Math.floor((now - start) / 1000))
+  const realSeconds = Math.max(0, Math.floor((now - start) / 1000))
+  const totalSeconds = Math.floor(realSeconds * multiplier)
   const h = Math.floor(totalSeconds / 3600)
   const m = Math.floor((totalSeconds % 3600) / 60)
   const s = totalSeconds % 60

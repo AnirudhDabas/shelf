@@ -36,6 +36,11 @@ const PLATEAU_THRESHOLD = 0.5
 const ALL_PRODUCTS_TARGET_SCORE = 90
 const BUDGET_WARN_FRACTION = 0.8
 const DEFAULT_QUERY_COUNT = 50
+// Dry-run scorers return $0 so the cost meter stays flat, which makes
+// demos look fake ("est. cost $0.000" for an hour-long run). Inject a
+// realistic per-iteration stand-in that matches what a live run roughly
+// costs ($0.08 × 25 iters ≈ $2). Only used when config.dryRun is true.
+const DRY_RUN_COST_PER_ITER = 0.08
 // Baseline only samples a subset — per-iteration measurements still hit
 // the full set so keep/revert decisions stay statistically sound. Without
 // this, a 50q × 3p × 3r baseline meant 15+ minutes of dead air at startup.
@@ -198,6 +203,12 @@ export async function runLoop(
       stopReason = 'budget exhausted'
       break
     }
+    // See DRY_RUN_COST_PER_ITER — stand-in cost so the budget meter
+    // visibly increments during demos. Counted once per iteration
+    // regardless of verdict (generator/apply/measure failures still
+    // consumed roughly that compute in a real run).
+    const iterCost = config.dryRun ? DRY_RUN_COST_PER_ITER : 0
+    if (iterCost > 0) budget.add(iterCost)
 
     const perProduct = scoreProducts(products, queries, currentByQuery)
     const targeted = [...perProduct.values()].filter((r) => r.hasTargets)
@@ -242,7 +253,7 @@ export async function runLoop(
           confidenceScore: 0,
           confidenceLevel: 'noise',
           durationMs: now() - iterStart,
-          costEstimateUsd: 0,
+          costEstimateUsd: iterCost,
           error: `generator failed: ${errMsg}`,
         }),
       )
@@ -285,7 +296,7 @@ export async function runLoop(
         confidenceScore: 0,
         confidenceLevel: 'noise',
         durationMs: now() - iterStart,
-        costEstimateUsd: 0,
+        costEstimateUsd: iterCost,
         failures: checks.failures,
       })
       jsonl.append(log)
@@ -327,7 +338,7 @@ export async function runLoop(
         confidenceScore: 0,
         confidenceLevel: 'noise',
         durationMs: now() - iterStart,
-        costEstimateUsd: 0,
+        costEstimateUsd: iterCost,
         error: errMsg,
       })
       jsonl.append(log)
@@ -385,7 +396,7 @@ export async function runLoop(
         confidenceScore: 0,
         confidenceLevel: 'noise',
         durationMs: now() - iterStart,
-        costEstimateUsd: 0,
+        costEstimateUsd: iterCost,
         applyResult,
         error: revertError ? `${errMsg}; revert failed: ${revertError}` : errMsg,
       })
@@ -454,7 +465,7 @@ export async function runLoop(
       confidenceScore: isFinite(confidence.score) ? confidence.score : 1000,
       confidenceLevel: confidence.level,
       durationMs: now() - iterStart,
-      costEstimateUsd: measurement.totalCostUsd,
+      costEstimateUsd: measurement.totalCostUsd + iterCost,
       applyResult,
       revertResult,
       error: errorField,

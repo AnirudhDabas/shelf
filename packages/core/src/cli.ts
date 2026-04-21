@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
-import { existsSync, writeFileSync, unlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createInterface } from 'node:readline/promises'
 import { stdin, stdout } from 'node:process'
 import { resolve } from 'node:path'
@@ -90,6 +90,7 @@ program
   .option('--budget <usd>', 'Override budget limit in USD', parseFloatArg)
   .option('--repetitions <n>', 'Queries repetitions per measurement', parseIntArg)
   .option('--delay <ms>', 'Artificial delay between iterations in ms (demo/recording aid)', parseIntArg, 0)
+  .option('--fake-elapsed', 'Multiply displayed elapsed time by 60 (requires --dry-run; demo aid)', false)
   .option('--store-category <label>', 'Category hint for hypothesis + query generation')
   .action(
     async (options: {
@@ -99,6 +100,7 @@ program
       budget?: number
       repetitions?: number
       delay: number
+      fakeElapsed: boolean
       storeCategory?: string
     }) => {
       const noShopify = options.shopify === false
@@ -107,6 +109,14 @@ program
         process.exitCode = 1
         return
       }
+      if (options.fakeElapsed && !options.dryRun) {
+        console.error(chalk.red('✗ --fake-elapsed requires --dry-run (demo-only aid).'))
+        process.exitCode = 1
+        return
+      }
+      const elapsedMultiplier = options.fakeElapsed ? 60 : 1
+      process.env.SHELF_ELAPSED_MULTIPLIER = String(elapsedMultiplier)
+      writeElapsedSidecar(elapsedMultiplier)
       const config = safeLoadConfig({
         dryRun: options.dryRun,
         noShopify,
@@ -508,10 +518,27 @@ function renderEvent(event: ShelfEvent): void {
 }
 
 function formatElapsed(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000)
+  const multiplier = Number.parseFloat(process.env.SHELF_ELAPSED_MULTIPLIER ?? '1') || 1
+  const totalSeconds = Math.floor((ms * multiplier) / 1000)
   const m = Math.floor(totalSeconds / 60)
   const s = totalSeconds % 60
   return `${m}m${s.toString().padStart(2, '0')}s`
+}
+
+// Dashboard runs as a separate process and can't read this process's env.
+// Drop the multiplier in .shelf-cache/ so the SSE route can pick it up.
+function writeElapsedSidecar(multiplier: number): void {
+  try {
+    const cacheDir = resolve(process.cwd(), '.shelf-cache')
+    if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true })
+    writeFileSync(
+      resolve(cacheDir, 'elapsed-multiplier'),
+      String(multiplier),
+      'utf-8',
+    )
+  } catch {
+    // non-fatal — demo-only feature
+  }
 }
 
 function truncate(s: string, max: number): string {

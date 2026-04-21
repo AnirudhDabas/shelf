@@ -41,7 +41,7 @@ export function ExperimentTable({ experiments }: ExperimentTableProps) {
               <Th className="w-12">#</Th>
               <Th>product</Th>
               <Th>type</Th>
-              <Th>description</Th>
+              <Th>new value</Th>
               <Th className="text-right">score</Th>
               <Th className="text-right">Δ</Th>
               <Th>verdict</Th>
@@ -83,8 +83,11 @@ function ExperimentRow({ exp, alt }: { exp: ExperimentLog; alt: boolean }) {
         <td className="px-4 py-3 font-mono tabular-nums text-text-secondary">{exp.iteration}</td>
         <td className="px-4 py-3 max-w-[16rem] truncate">{exp.hypothesis.productTitle}</td>
         <td className="px-4 py-3 font-mono text-xs text-text-secondary">{exp.hypothesis.type}</td>
-        <td className="px-4 py-3 max-w-[20rem] truncate text-text-primary">
-          {exp.hypothesis.description}
+        <td
+          className="px-4 py-3 max-w-[20rem] truncate text-text-primary font-mono text-xs"
+          title={exp.hypothesis.after}
+        >
+          {exp.hypothesis.after || '—'}
         </td>
         <td className="px-4 py-3 text-right font-mono tabular-nums">
           {exp.scoreBefore.toFixed(1)} → {exp.scoreAfter.toFixed(1)}

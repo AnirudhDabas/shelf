@@ -5,7 +5,7 @@ import { ScoreChart } from '../components/score-chart'
 import { StatusBar } from '../components/status-bar'
 
 export default function Page() {
-  const { experiments, waitingForFile, connected, path } = useEvents()
+  const { experiments, waitingForFile, connected, path, elapsedMultiplier } = useEvents()
   const startedAt = experiments[0]?.timestamp ?? null
 
   return (
@@ -27,7 +27,11 @@ export default function Page() {
           {path ? <span className="ml-2">· {path}</span> : null}
         </div>
       </header>
-      <StatusBar experiments={experiments} startedAt={startedAt} />
+      <StatusBar
+        experiments={experiments}
+        startedAt={startedAt}
+        elapsedMultiplier={elapsedMultiplier}
+      />
       <ScoreChart experiments={experiments} />
       <ExperimentTable experiments={experiments} />
       {waitingForFile && experiments.length === 0 ? (
