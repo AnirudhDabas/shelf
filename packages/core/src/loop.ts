@@ -47,7 +47,7 @@ const DRY_RUN_COST_PER_ITER = 0.08
 // per iteration) makes score deltas look smaller than they are because
 // they compare apples to oranges. Capped for latency: 50q × 3p × 3r at
 // baseline was 15+ minutes of dead air before the first hypothesis ran.
-const MEASUREMENT_QUERY_SAMPLE = 10
+const MEASUREMENT_QUERY_SAMPLE = 50
 
 // Sentinel used in stub hypotheses written when generation fails. Keeping
 // it as a named constant (instead of a magic string) makes JSONL consumers
@@ -236,7 +236,9 @@ async function runIteration(ctx: LoopContext, iteration: number): Promise<string
   recordAttempt(ctx.tried, product.id, hypothesis)
   ctx.sessionLogger.recordAttempt()
 
-  const checks = checkHypothesis(hypothesis, product)
+  const checks = ctx.config.dryRun
+    ? { passed: true, failures: [] as string[] }
+    : checkHypothesis(hypothesis, product)
   if (!checks.passed) {
     recordChecksFailed(ctx, hypothesis, product, iteration, iterStart, iterCost, checks.failures)
     return null

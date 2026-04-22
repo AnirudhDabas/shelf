@@ -8,9 +8,23 @@ export interface MockContext {
 }
 
 const BASE_P = 0.3
-const PER_ITER_DRIFT = 0.01
+const PER_ITER_DRIFT = 0.0152
 const DRIFT_CAP = 0.4
-const JITTER_AMPLITUDE = 0.1
+const JITTER_AMPLITUDE = 0
+
+// Stable per-query ordinal shared across all mock providers and scorings.
+// Assigned on first sight so the appeared-count is exactly floor(p * N)
+// instead of a binomial draw — gives the demo a smooth, predictable
+// 30 → 68 curve over 25 iterations regardless of how queries were generated.
+const queryOrdinals = new Map<string, number>()
+function ordinalFor(queryId: string): number {
+  let ord = queryOrdinals.get(queryId)
+  if (ord === undefined) {
+    ord = queryOrdinals.size
+    queryOrdinals.set(queryId, ord)
+  }
+  return ord
+}
 
 // Cheap 32-bit string hash → [0, 1). Deterministic per (query, iteration)
 // so all three mock providers agree on whether a query appeared — keeps
@@ -39,11 +53,14 @@ export class MockScorer implements ScoringProvider {
     const drift = Math.min(DRIFT_CAP, iter * PER_ITER_DRIFT)
     const jitter = (seededUnit(`iter:${iter}`) - 0.5) * 2 * JITTER_AMPLITUDE
     const p = clamp(BASE_P + drift + jitter, 0, 1)
-    // Seed without provider name — all three mock providers agree on
-    // whether a query appeared, so the overall aggregate stays near p
-    // instead of ballooning via the OR across providers.
-    const roll = seededUnit(`${query.id}|${iter}`)
-    const appeared = roll < p
+    // Ordinal-based threshold: first-seen ordering assigns each query a
+    // stable slot in [0, N). The lowest ⌊p·N⌋ ordinals appear, giving
+    // score ≈ p·100 without binomial sampling noise. N hardcoded to
+    // MEASUREMENT_QUERY_SAMPLE from loop.ts so the baseline's incremental
+    // ordinal assignment still yields the right denominator.
+    const ord = ordinalFor(query.id)
+    const threshold = (ord + 0.5) / 50
+    const appeared = threshold < p
     return {
       queryId: query.id,
       provider: this.name,
