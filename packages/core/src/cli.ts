@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createInterface } from 'node:readline/promises'
 import { stdin, stdout } from 'node:process'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import chalk from 'chalk'
 import { Command } from 'commander'
 import Table from 'cli-table3'
@@ -19,6 +20,11 @@ import { ShopifyAdminClient } from './shopify/admin.js'
 import type { ShopifyProduct } from './shopify/types.js'
 import { FileCache } from './utils/cache.js'
 
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const pkg = JSON.parse(
+  readFileSync(resolve(__dirname, '../../../package.json'), 'utf-8'),
+) as { version: string }
+
 const program = new Command()
 
 program
@@ -26,7 +32,7 @@ program
   .description(
     'Autoresearch loop for Shopify catalogs — raise how often AI shopping agents surface your products.',
   )
-  .version('0.1.0')
+  .version(pkg.version)
 
 program
   .command('init')

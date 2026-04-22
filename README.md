@@ -7,8 +7,6 @@ It isn't showing up.
 
 `shelf` is an autonomous agent that tunes your product catalog until it does.
 
-![dashboard](docs/dashboard.png)
-
 ## How it works
 
 1. Generate ~50 realistic shopper queries for your catalog with Claude.
@@ -74,13 +72,15 @@ Next.js app on port 3000. Tails `shelf.jsonl` via SSE and renders the live score
 | Env var                            | Purpose                                                           |
 | ---------------------------------- | ----------------------------------------------------------------- |
 | `SHOPIFY_STORE_DOMAIN`             | `your-store.myshopify.com`                                        |
+| `SHOPIFY_CLIENT_ID`                | OAuth client credentials (preferred over admin access token). When both OAuth and access token are set, OAuth wins. |
+| `SHOPIFY_CLIENT_SECRET`            | OAuth client credentials (preferred over admin access token). When both OAuth and access token are set, OAuth wins. |
 | `SHOPIFY_ADMIN_ACCESS_TOKEN`       | Admin API token with `write_products` + `write_product_listings`  |
 | `PERPLEXITY_API_KEY`               | Sonar scoring provider (optional, at least one scorer required)   |
 | `OPENAI_API_KEY`                   | OpenAI `web_search` scoring provider (optional)                   |
 | `ANTHROPIC_API_KEY`                | Required — powers hypothesis + query generation                   |
 | `SHELF_BUDGET_LIMIT_USD`           | Stop the loop when total estimated spend exceeds this (default 5 — roughly 5-10 real iterations depending on which scoring providers you enable; raise for longer runs) |
 | `SHELF_MAX_ITERATIONS`             | Hard cap on iterations (default 100)                              |
-| `SHELF_QUERIES_PER_MEASUREMENT`    | Query sample size per score measurement (default 3)               |
+| `SHELF_QUERIES_PER_MEASUREMENT`    | Repetitions per (query, provider) pair for majority voting (default: 3) |
 | `SHELF_LOG_FILE`                   | Path for the jsonl experiment log (default `shelf.jsonl`)         |
 | `SHELF_SESSION_FILE`               | Path for the human-readable session doc (default `shelf.md`)      |
 

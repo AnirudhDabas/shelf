@@ -13,3 +13,4 @@ shelf.md
 .vscode/
 .idea/
 *.tsbuildinfo
+.claude/settings.local.json
