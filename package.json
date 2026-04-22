@@ -1,6 +1,6 @@
 {
   "name": "shelf-ai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Autonomous optimization loop for Shopify product catalogs — makes AI shopping agents actually surface your products",
   "type": "module",
   "packageManager": "pnpm@9.12.0",
