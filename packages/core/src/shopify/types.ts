@@ -61,12 +61,6 @@ export interface MetafieldIdentifierInput {
   key: string
 }
 
-export interface ProductVariantsBulkInput {
-  id: string
-  title?: string
-  price?: string
-}
-
 export interface UserError {
   field: string[] | null
   message: string
@@ -93,9 +87,3 @@ export interface MetafieldsDeleteResponse {
   }
 }
 
-export interface ProductVariantsBulkUpdateResponse {
-  productVariantsBulkUpdate: {
-    productVariants: Array<{ id: string; title: string }> | null
-    userErrors: UserError[]
-  }
-}

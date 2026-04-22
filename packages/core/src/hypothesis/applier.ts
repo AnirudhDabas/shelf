@@ -138,9 +138,6 @@ function parseTags(raw: string): string[] {
 }
 
 function applyDryRun(h: Hypothesis, product: ShopifyProduct): ApplyResult {
-  console.log(
-    `[dry-run] would apply ${h.type} to ${product.id} (${product.title}): "${truncateValue(h.after)}"`,
-  )
   const changes: FieldChange[] = [
     change(fieldLabel(h), currentValue(h, product), h.after),
   ]
@@ -200,6 +197,3 @@ function currentValue(h: Hypothesis, p: ShopifyProduct): string {
   }
 }
 
-function truncateValue(s: string): string {
-  return s.length <= 80 ? s : `${s.slice(0, 79)}…`
-}

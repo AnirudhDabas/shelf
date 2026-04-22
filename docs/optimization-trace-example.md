@@ -1,5 +1,7 @@
 # Optimization trace (example)
 
+> **Illustrative example.** The hypotheses, before/after diffs, and score deltas below are hand-crafted to show what a real run looks like — they are not the output of a single recorded session. The scoring engine, hypothesis generator, applier, reverter, and verdict logic are exactly as described; the numbers and product titles are representative, not measured. Run `npx shelf-ai run` against your own store to produce a real trace in `shelf.jsonl`.
+
 A worked example: twelve experiments against the demo rain-gear catalog, starting from an AI Shelf Score of **8.0** and ending at **63.3**. Each entry has the full hypothesis, before/after, score delta, verdict, and a short note on *why*.
 
 Scores are against the 50-query demo set at [fixtures/demo-store/queries.json](../fixtures/demo-store/queries.json), measured with 3 repetitions per `(query, provider)` pair across Perplexity + OpenAI + Anthropic.
@@ -156,7 +158,7 @@ Waterproof Waterproof Rain Jacket — Best Waterproof Waterproof Hiking Jacket f
 - **Type**: `seo_description` on `seo.description`
 - **Error**: `Perplexity API timeout after 30s (retry budget exhausted)`
 
-*Why it was skipped:* Anthropic's web-search tool was rate-limited, Perplexity timed out twice, OpenAI returned successfully — but the engine requires at least two successful providers to aggregate. Logged as `measure_failed`, no store change reverted (because apply succeeded). Re-measured on the next iteration.
+*Why it was skipped:* Perplexity timed out twice through its retry budget and threw, which propagated up through `measureScore` and aborted the iteration before the aggregator ran. Logged as `measure_failed` — apply succeeded but the post-apply score is unknown, so the change is left in place to be re-measured on the next iteration.
 
 ---
 
@@ -240,6 +242,6 @@ waterproofing, storm hood with wire brim. Sizes XS-XL.
 | Checks failed             | 1                       |
 | Measure failed            | 1                       |
 | Score delta               | 8.0 → 63.3 (+55.3)      |
-| Total cost                | $3.87                   |
+| Total cost                | ~$3.87 (illustrative)   |
 
 What the trace makes visible: **half the wins are description restructures**, two different title strategies have opposite results, and keyword stuffing is caught before it touches the store. The revert mechanism is what lets the loop stay aggressive — it's cheap to try a bold rewrite if the negative case fixes itself.

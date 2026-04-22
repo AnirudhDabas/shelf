@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      shopify:
+        patterns:
+          - '@shopify/*'
+      ai-providers:
+        patterns:
+          - '@anthropic-ai/*'
+          - openai
+      dev-tooling:
+        patterns:
+          - eslint
+          - eslint-*
+          - typescript-eslint
+          - prettier
+          - typescript
+          - turbo
+          - vitest
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid'
 import type { ShelfConfig } from './config.js'
 import { checkHypothesis } from './checks/backpressure.js'
 import { computeConfidence } from './confidence/mad.js'
+import type { ConfidenceResult } from './confidence/mad.js'
 import { ShelfEventEmitter } from './events/emitter.js'
 import {
   HypothesisApplier,
@@ -48,6 +49,11 @@ const DRY_RUN_COST_PER_ITER = 0.08
 // baseline was 15+ minutes of dead air before the first hypothesis ran.
 const MEASUREMENT_QUERY_SAMPLE = 10
 
+// Sentinel used in stub hypotheses written when generation fails. Keeping
+// it as a named constant (instead of a magic string) makes JSONL consumers
+// like the trace exporter able to filter these out reliably.
+const BASELINE_FIELD_SENTINEL = 'baseline'
+
 function logPhase(msg: string): void {
   process.stdout.write(`${msg}\n`)
 }
@@ -85,11 +91,369 @@ export interface RunLoopDependencies {
   storeCategory?: string
 }
 
+// Single mutable scratchpad threaded through every per-iteration helper.
+// All state that survives across iterations lives here; a helper that needs
+// to influence the next iteration mutates this struct rather than returning
+// a new value.
+interface LoopContext {
+  config: ShelfConfig
+  emitter: ShelfEventEmitter
+  generator: HypothesisGenerator
+  applier: HypothesisApplier
+  reverter: HypothesisReverter
+  jsonl: JsonlLogger
+  sessionLogger: SessionLogger
+  budget: BudgetTracker
+  providers: ScoringProvider[]
+  products: ShopifyProduct[]
+  queries: ScoringQuery[]
+  storeCategory?: string
+  startedAt: number
+  now: () => number
+  sleepFn: (ms: number) => Promise<void>
+  propagationDelay: number
+  iterationDelay: number
+  mockCtx: MockContext
+  currentScore: number
+  currentByQuery: Record<string, boolean>
+  lastModified: Map<string, number>
+  tried: Map<string, Array<Pick<Hypothesis, 'type' | 'field' | 'after'>>>
+  historicalDeltas: number[]
+  recentVerdicts: Verdict[]
+  budgetWarned: boolean
+}
+
+/**
+ * Top-level orchestrator. Bootstraps dependencies, measures the baseline,
+ * then drives the propose → apply → measure → decide loop until a stop
+ * condition fires (budget exhausted, plateau, no recent wins, or max iters).
+ *
+ * Per-iteration logic lives in {@link runIteration}; stop conditions live
+ * in {@link shouldStop}. This function should read top-to-bottom as the
+ * shape of the algorithm, not the implementation of any single step.
+ */
 export async function runLoop(
   config: ShelfConfig,
   emitter: ShelfEventEmitter,
   deps: RunLoopDependencies = {},
 ): Promise<SessionState> {
+  const ctx = await buildLoopContext(config, emitter, deps)
+
+  const baseline = await measureBaseline(ctx)
+  ctx.currentScore = baseline.overall
+  ctx.currentByQuery = baseline.byQuery
+  ctx.sessionLogger.start({ baselineScore: baseline.overall })
+  emitSessionStart(ctx, baseline.overall)
+
+  let stopReason = 'max iterations reached'
+  let iteration = 0
+  for (iteration = 1; iteration <= config.loop.maxIterations; iteration++) {
+    ctx.mockCtx.iteration = iteration
+    if (iteration > 1 && ctx.iterationDelay > 0) {
+      await ctx.sleepFn(ctx.iterationDelay)
+    }
+    const stop = await runIteration(ctx, iteration)
+    if (stop) {
+      stopReason = stop
+      break
+    }
+  }
+
+  const finalState = ctx.sessionLogger.end(ctx.currentScore, stopReason)
+  emitSessionEnd(ctx, iteration, baseline.overall, stopReason)
+  return finalState
+}
+
+/**
+ * Runs one cycle: pick a product, ask the generator for a hypothesis,
+ * run backpressure checks, apply via Shopify, re-measure, decide keep
+ * vs revert, log the experiment, and update session state.
+ *
+ * Returns a stop reason string when this iteration should also terminate
+ * the outer loop (e.g. budget hit, all products at ceiling); otherwise
+ * returns null and the outer loop continues. Failures inside a single
+ * stage (generator, apply, measure) are logged as a `*_failed` verdict
+ * and the iteration ends gracefully — they don't stop the loop.
+ */
+async function runIteration(ctx: LoopContext, iteration: number): Promise<string | null> {
+  if (ctx.budget.exhausted()) return 'budget exhausted'
+  // See DRY_RUN_COST_PER_ITER — stand-in cost so the budget meter visibly
+  // increments during demos. Counted once per iteration regardless of
+  // verdict (generator/apply/measure failures still consumed roughly that
+  // compute in a real run).
+  const iterCost = ctx.config.dryRun ? DRY_RUN_COST_PER_ITER : 0
+  if (iterCost > 0) ctx.budget.add(iterCost)
+
+  const perProduct = scoreProducts(ctx.products, ctx.queries, ctx.currentByQuery)
+  const targeted = [...perProduct.values()].filter((r) => r.hasTargets)
+  if (targeted.length > 0 && targeted.every((r) => r.score >= ALL_PRODUCTS_TARGET_SCORE)) {
+    return `all products above ${ALL_PRODUCTS_TARGET_SCORE}/100`
+  }
+  const product = selectProduct(ctx.products, perProduct, ctx.lastModified, iteration)
+  if (!product) return 'no eligible product (all in cooldown or at ceiling)'
+
+  const iterStart = ctx.now()
+  const failedQueries = ctx.queries
+    .filter((q) => q.targetProductIds?.includes(product.id) && !ctx.currentByQuery[q.id])
+    .map((q) => ({ id: q.id, text: q.text, intent: q.intent }))
+  const priorAttempts = ctx.tried.get(product.id) ?? []
+
+  let hypothesis: Hypothesis
+  try {
+    hypothesis = await ctx.generator.generate({
+      product,
+      failedQueries,
+      triedHypotheses: priorAttempts,
+      storeCategory: ctx.storeCategory,
+    })
+    ctx.budget.add(ctx.generator.lastCostUsd ?? 0)
+  } catch (err) {
+    const errMsg = errorMessage(err)
+    recordFailure(ctx, {
+      hypothesis: stubHypothesis(product),
+      iteration,
+      verdict: 'generator_failed',
+      durationMs: ctx.now() - iterStart,
+      costEstimateUsd: iterCost,
+      product,
+      reason: `generator: ${errMsg}`,
+      error: `generator failed: ${errMsg}`,
+    })
+    return null
+  }
+
+  ctx.emitter.emit({
+    type: 'hypothesis:proposed',
+    iteration,
+    elapsedMs: ctx.now() - ctx.startedAt,
+    costUsd: ctx.budget.total(),
+    scoreDelta: 0,
+    confidence: 'noise',
+    productId: product.id,
+    hypothesis,
+  })
+
+  recordAttempt(ctx.tried, product.id, hypothesis)
+  ctx.sessionLogger.recordAttempt()
+
+  const checks = checkHypothesis(hypothesis, product)
+  if (!checks.passed) {
+    recordChecksFailed(ctx, hypothesis, product, iteration, iterStart, iterCost, checks.failures)
+    return null
+  }
+
+  let applyResult: ApplyResult
+  try {
+    applyResult = await ctx.applier.apply(hypothesis, product)
+  } catch (err) {
+    const errMsg = errorMessage(err)
+    recordFailure(ctx, {
+      hypothesis,
+      iteration,
+      verdict: 'apply_failed',
+      durationMs: ctx.now() - iterStart,
+      costEstimateUsd: iterCost,
+      product,
+      reason: `apply failed: ${errMsg}`,
+      error: errMsg,
+    })
+    return null
+  }
+
+  ctx.emitter.emit({
+    type: 'hypothesis:applied',
+    iteration,
+    elapsedMs: ctx.now() - ctx.startedAt,
+    costUsd: ctx.budget.total(),
+    scoreDelta: 0,
+    confidence: 'noise',
+    productId: product.id,
+    hypothesisId: hypothesis.id,
+    applyResult,
+  })
+
+  await ctx.sleepFn(ctx.propagationDelay)
+
+  let measurement: AggregatedScore
+  try {
+    measurement = await measureIteration(ctx, iteration)
+  } catch (err) {
+    await handleMeasureFailure(ctx, err, applyResult, hypothesis, product, iteration, iterStart, iterCost)
+    return null
+  }
+
+  ctx.budget.add(measurement.totalCostUsd)
+  const scoreBefore = ctx.currentScore
+  const scoreAfter = measurement.overall
+  const scoreDelta = scoreAfter - scoreBefore
+  const confidence = computeConfidence(scoreDelta, ctx.historicalDeltas)
+  ctx.historicalDeltas.push(scoreDelta)
+
+  ctx.emitter.emit({
+    type: 'measurement:complete',
+    iteration,
+    elapsedMs: ctx.now() - ctx.startedAt,
+    costUsd: ctx.budget.total(),
+    scoreDelta,
+    confidence: confidence.level,
+    productId: product.id,
+    scoreBefore,
+    scoreAfter,
+  })
+
+  const { verdict } = decideVerdict(scoreBefore, scoreAfter, confidence)
+  let revertResult: RevertResult | undefined
+  let errorField: string | undefined
+
+  if (verdict === 'kept' || verdict === 'kept_uncertain') {
+    ctx.currentScore = scoreAfter
+    ctx.currentByQuery = measurement.byQuery
+    ctx.lastModified.set(product.id, iteration)
+    ctx.sessionLogger.recordProductTouched(product.id)
+  } else {
+    try {
+      revertResult = await ctx.reverter.revert(applyResult)
+    } catch (err) {
+      errorField = `revert failed: ${errorMessage(err)}`
+    }
+  }
+
+  const log = buildLog({
+    hypothesis,
+    iteration,
+    verdict,
+    scoreBefore,
+    scoreAfter,
+    scoreDelta,
+    confidenceScore: isFinite(confidence.score) ? confidence.score : 1000,
+    confidenceLevel: confidence.level,
+    durationMs: ctx.now() - iterStart,
+    costEstimateUsd: measurement.totalCostUsd + iterCost,
+    applyResult,
+    revertResult,
+    error: errorField,
+  })
+  recordExperiment(ctx, log, product.id, scoreDelta, confidence.level)
+
+  if (verdict === 'kept' || verdict === 'kept_uncertain') {
+    ctx.sessionLogger.recordKeyWin({
+      iteration,
+      productId: product.id,
+      productTitle: hypothesis.productTitle,
+      description: hypothesis.description,
+      scoreDelta,
+    })
+  } else {
+    ctx.sessionLogger.recordDeadEnd({
+      iteration,
+      productId: product.id,
+      productTitle: hypothesis.productTitle,
+      description: hypothesis.description,
+      reason: errorField ?? `reverted (Δ ${scoreDelta.toFixed(2)}, ${confidence.level})`,
+    })
+  }
+  ctx.recentVerdicts.push(verdict)
+  persistSession(ctx, iteration)
+
+  maybeEmitBudgetWarning(ctx, iteration)
+  return shouldStop(ctx)
+}
+
+/**
+ * Pure decision: given a score-before, score-after, and the MAD-derived
+ * confidence, classify the experiment as kept / kept_uncertain / reverted.
+ *
+ * - Score went up + high confidence  → kept
+ * - Score went up + lower confidence → kept_uncertain
+ * - Score did not improve            → reverted
+ *
+ * Reasoning is included so callers can log *why* an experiment landed
+ * where it did without re-deriving the rule.
+ */
+export function decideVerdict(
+  scoreBefore: number,
+  scoreAfter: number,
+  confidence: ConfidenceResult,
+): { verdict: 'kept' | 'kept_uncertain' | 'reverted'; reasoning: string } {
+  if (scoreAfter > scoreBefore) {
+    if (confidence.level === 'high') {
+      return {
+        verdict: 'kept',
+        reasoning: `score improved (+${(scoreAfter - scoreBefore).toFixed(2)}) above MAD noise floor`,
+      }
+    }
+    return {
+      verdict: 'kept_uncertain',
+      reasoning: `score improved (+${(scoreAfter - scoreBefore).toFixed(2)}) but confidence is ${confidence.level}`,
+    }
+  }
+  return {
+    verdict: 'reverted',
+    reasoning: `score did not improve (Δ ${(scoreAfter - scoreBefore).toFixed(2)})`,
+  }
+}
+
+/**
+ * Persist a completed experiment: append to the JSONL log and emit the
+ * matching SSE event so the live dashboard updates. Centralising this
+ * keeps the JSONL-on-disk record and the wire stream in lockstep — every
+ * keep/revert that reaches the log also reaches the dashboard.
+ */
+function recordExperiment(
+  ctx: LoopContext,
+  log: ExperimentLog,
+  productId: string,
+  scoreDelta: number,
+  confidenceLevel: ConfidenceResult['level'],
+): void {
+  ctx.jsonl.append(log)
+  const eventType =
+    log.verdict === 'kept'
+      ? 'experiment:kept'
+      : log.verdict === 'kept_uncertain'
+        ? 'experiment:kept_uncertain'
+        : 'experiment:reverted'
+  ctx.emitter.emit({
+    type: eventType,
+    iteration: log.iteration,
+    elapsedMs: ctx.now() - ctx.startedAt,
+    costUsd: ctx.budget.total(),
+    scoreDelta,
+    confidence: confidenceLevel,
+    productId,
+    log,
+  })
+}
+
+/**
+ * Loop-level stop conditions that can fire at the end of any iteration.
+ * Returns a human-readable reason when the loop should terminate, or null
+ * to continue. Order matters: budget is hardest stop (no more spend),
+ * then dryness checks (no recent wins / score plateau).
+ */
+function shouldStop(ctx: LoopContext): string | null {
+  if (ctx.budget.exhausted()) return 'budget exhausted'
+  if (ctx.recentVerdicts.length >= NO_KEEP_STOP_WINDOW) {
+    const window = ctx.recentVerdicts.slice(-NO_KEEP_STOP_WINDOW)
+    if (!window.some((v) => v === 'kept' || v === 'kept_uncertain')) {
+      return `no kept changes in last ${NO_KEEP_STOP_WINDOW} iterations`
+    }
+  }
+  if (ctx.historicalDeltas.length >= PLATEAU_WINDOW) {
+    const window = ctx.historicalDeltas.slice(-PLATEAU_WINDOW)
+    const avg = window.reduce((s, d) => s + d, 0) / window.length
+    if (avg < PLATEAU_THRESHOLD) {
+      return `score improvement averaged ${avg.toFixed(2)}/iter over last ${PLATEAU_WINDOW}`
+    }
+  }
+  return null
+}
+
+async function buildLoopContext(
+  config: ShelfConfig,
+  emitter: ShelfEventEmitter,
+  deps: RunLoopDependencies,
+): Promise<LoopContext> {
   const anthropicKey = config.dryRun ? undefined : requireAnthropicKey(config)
   const now = deps.now ?? (() => Date.now())
   const sleepFn = deps.sleepMs ?? sleep
@@ -167,418 +531,252 @@ export async function runLoop(
     queries = queries.slice(0, MEASUREMENT_QUERY_SAMPLE)
   }
 
-  const startedAt = now()
+  return {
+    config,
+    emitter,
+    generator,
+    applier,
+    reverter,
+    jsonl,
+    sessionLogger,
+    budget,
+    providers,
+    products,
+    queries,
+    storeCategory: deps.storeCategory,
+    startedAt: now(),
+    now,
+    sleepFn,
+    propagationDelay,
+    iterationDelay,
+    mockCtx,
+    currentScore: 0,
+    currentByQuery: {},
+    lastModified: new Map(),
+    tried: new Map(),
+    historicalDeltas: [],
+    recentVerdicts: [],
+    budgetWarned: false,
+  }
+}
+
+async function measureBaseline(ctx: LoopContext): Promise<AggregatedScore> {
   logPhase(
-    `• measuring baseline: ${queries.length} queries × ${providers.length} providers × ${config.loop.queriesPerMeasurement} reps`,
+    `• measuring baseline: ${ctx.queries.length} queries × ${ctx.providers.length} providers × ${ctx.config.loop.queriesPerMeasurement} reps`,
   )
   const baselineTotal =
-    queries.length * providers.length * config.loop.queriesPerMeasurement
-  const baseline = await measureScore(queries, config.store.domain, providers, {
-    repetitions: config.loop.queriesPerMeasurement,
+    ctx.queries.length * ctx.providers.length * ctx.config.loop.queriesPerMeasurement
+  const baseline = await measureScore(ctx.queries, ctx.config.store.domain, ctx.providers, {
+    repetitions: ctx.config.loop.queriesPerMeasurement,
     onResult: progressWriter('baseline', baselineTotal),
   })
-  budget.add(baseline.totalCostUsd)
+  ctx.budget.add(baseline.totalCostUsd)
   logPhase(
     `  → baseline ${baseline.overall.toFixed(1)}/100 (cost $${baseline.totalCostUsd.toFixed(2)})`,
   )
+  return baseline
+}
 
-  sessionLogger.start({ baselineScore: baseline.overall })
-  emitter.emit({
-    type: 'session:start',
-    iteration: 0,
-    elapsedMs: now() - startedAt,
-    costUsd: budget.total(),
+async function measureIteration(ctx: LoopContext, iteration: number): Promise<AggregatedScore> {
+  const iterTotal =
+    ctx.queries.length * ctx.providers.length * ctx.config.loop.queriesPerMeasurement
+  logPhase(
+    `  iter ${iteration}: measuring ${ctx.queries.length} queries × ${ctx.providers.length} providers × ${ctx.config.loop.queriesPerMeasurement} reps`,
+  )
+  return measureScore(ctx.queries, ctx.config.store.domain, ctx.providers, {
+    repetitions: ctx.config.loop.queriesPerMeasurement,
+    onResult: progressWriter(`iter ${iteration}`, iterTotal),
+  })
+}
+
+interface FailureRecord {
+  hypothesis: Hypothesis
+  iteration: number
+  verdict: Verdict
+  durationMs: number
+  costEstimateUsd: number
+  product: ShopifyProduct
+  reason: string
+  error: string
+}
+
+function recordFailure(ctx: LoopContext, f: FailureRecord): void {
+  ctx.jsonl.append(
+    buildLog({
+      hypothesis: f.hypothesis,
+      iteration: f.iteration,
+      verdict: f.verdict,
+      scoreBefore: ctx.currentScore,
+      scoreAfter: ctx.currentScore,
+      scoreDelta: 0,
+      confidenceScore: 0,
+      confidenceLevel: 'noise',
+      durationMs: f.durationMs,
+      costEstimateUsd: f.costEstimateUsd,
+      error: f.error,
+    }),
+  )
+  if (f.verdict === 'generator_failed') {
+    ctx.sessionLogger.recordAttempt()
+  }
+  ctx.sessionLogger.recordDeadEnd({
+    iteration: f.iteration,
+    productId: f.product.id,
+    productTitle: f.hypothesis.productTitle || f.product.title,
+    description:
+      f.verdict === 'generator_failed'
+        ? 'hypothesis generation failed'
+        : f.hypothesis.description,
+    reason: f.reason,
+  })
+  ctx.recentVerdicts.push(f.verdict)
+  persistSession(ctx, f.iteration)
+}
+
+function recordChecksFailed(
+  ctx: LoopContext,
+  hypothesis: Hypothesis,
+  product: ShopifyProduct,
+  iteration: number,
+  iterStart: number,
+  iterCost: number,
+  failures: string[],
+): void {
+  const log = buildLog({
+    hypothesis,
+    iteration,
+    verdict: 'checks_failed',
+    scoreBefore: ctx.currentScore,
+    scoreAfter: ctx.currentScore,
+    scoreDelta: 0,
+    confidenceScore: 0,
+    confidenceLevel: 'noise',
+    durationMs: ctx.now() - iterStart,
+    costEstimateUsd: iterCost,
+    failures,
+  })
+  ctx.jsonl.append(log)
+  ctx.emitter.emit({
+    type: 'checks:failed',
+    iteration,
+    elapsedMs: ctx.now() - ctx.startedAt,
+    costUsd: ctx.budget.total(),
     scoreDelta: 0,
     confidence: 'noise',
-    baselineScore: baseline.overall,
-    queriesCount: queries.length,
-    productsCount: products.length,
-    maxIterations: config.loop.maxIterations,
-    budgetLimitUsd: config.loop.budgetLimitUsd,
+    productId: product.id,
+    hypothesisId: hypothesis.id,
+    failures,
   })
+  ctx.sessionLogger.recordDeadEnd({
+    iteration,
+    productId: product.id,
+    productTitle: hypothesis.productTitle,
+    description: hypothesis.description,
+    reason: `checks failed: ${failures[0] ?? 'unknown'}`,
+  })
+  ctx.recentVerdicts.push('checks_failed')
+  persistSession(ctx, iteration)
+}
 
-  let currentByQuery = baseline.byQuery
-  let currentScore = baseline.overall
-  const lastModified = new Map<string, number>()
-  const tried = new Map<string, Array<Pick<Hypothesis, 'type' | 'field' | 'after'>>>()
-  const historicalDeltas: number[] = []
-  const recentVerdicts: Verdict[] = []
-  let budgetWarned = false
-  let stopReason = 'max iterations reached'
-  let iteration = 0
-
-  for (iteration = 1; iteration <= config.loop.maxIterations; iteration++) {
-    mockCtx.iteration = iteration
-    if (iteration > 1 && iterationDelay > 0) {
-      await sleepFn(iterationDelay)
-    }
-    if (budget.exhausted()) {
-      stopReason = 'budget exhausted'
-      break
-    }
-    // See DRY_RUN_COST_PER_ITER — stand-in cost so the budget meter
-    // visibly increments during demos. Counted once per iteration
-    // regardless of verdict (generator/apply/measure failures still
-    // consumed roughly that compute in a real run).
-    const iterCost = config.dryRun ? DRY_RUN_COST_PER_ITER : 0
-    if (iterCost > 0) budget.add(iterCost)
-
-    const perProduct = scoreProducts(products, queries, currentByQuery)
-    const targeted = [...perProduct.values()].filter((r) => r.hasTargets)
-    if (targeted.length > 0 && targeted.every((r) => r.score >= ALL_PRODUCTS_TARGET_SCORE)) {
-      stopReason = `all products above ${ALL_PRODUCTS_TARGET_SCORE}/100`
-      break
-    }
-
-    const selection = selectProduct(products, perProduct, lastModified, iteration)
-    if (!selection) {
-      stopReason = 'no eligible product (all in cooldown or at ceiling)'
-      break
-    }
-    const product = selection
-
-    const iterStart = now()
-    const failedQueries = queries
-      .filter((q) => q.targetProductIds?.includes(product.id) && !currentByQuery[q.id])
-      .map((q) => ({ id: q.id, text: q.text, intent: q.intent }))
-    const priorAttempts = tried.get(product.id) ?? []
-
-    let hypothesis: Hypothesis
-    try {
-      hypothesis = await generator.generate({
-        product,
-        failedQueries,
-        triedHypotheses: priorAttempts,
-        storeCategory: deps.storeCategory,
-      })
-      budget.add(generator.lastCostUsd ?? 0)
-    } catch (err) {
-      const errMsg = errorMessage(err)
-      const stub = stubHypothesis(product)
-      jsonl.append(
-        buildLog({
-          hypothesis: stub,
-          iteration,
-          verdict: 'generator_failed',
-          scoreBefore: currentScore,
-          scoreAfter: currentScore,
-          scoreDelta: 0,
-          confidenceScore: 0,
-          confidenceLevel: 'noise',
-          durationMs: now() - iterStart,
-          costEstimateUsd: iterCost,
-          error: `generator failed: ${errMsg}`,
-        }),
-      )
-      sessionLogger.recordAttempt()
-      sessionLogger.recordDeadEnd({
-        iteration,
-        productId: product.id,
-        productTitle: product.title,
-        description: 'hypothesis generation failed',
-        reason: `generator: ${errMsg}`,
-      })
-      recentVerdicts.push('generator_failed')
-      persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
-      continue
-    }
-
-    emitter.emit({
-      type: 'hypothesis:proposed',
-      iteration,
-      elapsedMs: now() - startedAt,
-      costUsd: budget.total(),
-      scoreDelta: 0,
-      confidence: 'noise',
-      productId: product.id,
-      hypothesis,
-    })
-
-    recordAttempt(tried, product.id, hypothesis)
-    sessionLogger.recordAttempt()
-
-    const checks = checkHypothesis(hypothesis, product)
-    if (!checks.passed) {
-      const log = buildLog({
-        hypothesis,
-        iteration,
-        verdict: 'checks_failed',
-        scoreBefore: currentScore,
-        scoreAfter: currentScore,
-        scoreDelta: 0,
-        confidenceScore: 0,
-        confidenceLevel: 'noise',
-        durationMs: now() - iterStart,
-        costEstimateUsd: iterCost,
-        failures: checks.failures,
-      })
-      jsonl.append(log)
-      emitter.emit({
-        type: 'checks:failed',
-        iteration,
-        elapsedMs: now() - startedAt,
-        costUsd: budget.total(),
-        scoreDelta: 0,
-        confidence: 'noise',
-        productId: product.id,
-        hypothesisId: hypothesis.id,
-        failures: checks.failures,
-      })
-      sessionLogger.recordDeadEnd({
-        iteration,
-        productId: product.id,
-        productTitle: hypothesis.productTitle,
-        description: hypothesis.description,
-        reason: `checks failed: ${checks.failures[0] ?? 'unknown'}`,
-      })
-      recentVerdicts.push('checks_failed')
-      persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
-      continue
-    }
-
-    let applyResult: ApplyResult
-    try {
-      applyResult = await applier.apply(hypothesis, product)
-    } catch (err) {
-      const errMsg = errorMessage(err)
-      const log = buildLog({
-        hypothesis,
-        iteration,
-        verdict: 'apply_failed',
-        scoreBefore: currentScore,
-        scoreAfter: currentScore,
-        scoreDelta: 0,
-        confidenceScore: 0,
-        confidenceLevel: 'noise',
-        durationMs: now() - iterStart,
-        costEstimateUsd: iterCost,
-        error: errMsg,
-      })
-      jsonl.append(log)
-      sessionLogger.recordDeadEnd({
-        iteration,
-        productId: product.id,
-        productTitle: hypothesis.productTitle,
-        description: hypothesis.description,
-        reason: `apply failed: ${errMsg}`,
-      })
-      recentVerdicts.push('apply_failed')
-      persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
-      continue
-    }
-
-    emitter.emit({
-      type: 'hypothesis:applied',
-      iteration,
-      elapsedMs: now() - startedAt,
-      costUsd: budget.total(),
-      scoreDelta: 0,
-      confidence: 'noise',
-      productId: product.id,
-      hypothesisId: hypothesis.id,
-      applyResult,
-    })
-
-    await sleepFn(propagationDelay)
-
-    const iterTotal = queries.length * providers.length * config.loop.queriesPerMeasurement
-    logPhase(
-      `  iter ${iteration}: measuring ${queries.length} queries × ${providers.length} providers × ${config.loop.queriesPerMeasurement} reps`,
-    )
-    let measurement: AggregatedScore
-    try {
-      measurement = await measureScore(queries, config.store.domain, providers, {
-        repetitions: config.loop.queriesPerMeasurement,
-        onResult: progressWriter(`iter ${iteration}`, iterTotal),
-      })
-    } catch (err) {
-      const errMsg = errorMessage(err)
-      let revertError: string | undefined
-      let revertResult: RevertResult | undefined
-      try {
-        revertResult = await reverter.revert(applyResult)
-      } catch (revertErr) {
-        revertError = errorMessage(revertErr)
-      }
-      const log = buildLog({
-        hypothesis,
-        iteration,
-        verdict: 'measure_failed',
-        scoreBefore: currentScore,
-        scoreAfter: currentScore,
-        scoreDelta: 0,
-        confidenceScore: 0,
-        confidenceLevel: 'noise',
-        durationMs: now() - iterStart,
-        costEstimateUsd: iterCost,
-        applyResult,
-        revertResult,
-        error: revertError ? `${errMsg}; revert failed: ${revertError}` : errMsg,
-      })
-      jsonl.append(log)
-      sessionLogger.recordDeadEnd({
-        iteration,
-        productId: product.id,
-        productTitle: hypothesis.productTitle,
-        description: hypothesis.description,
-        reason: revertError ? `measure failed: ${errMsg}; revert failed: ${revertError}` : `measure failed: ${errMsg}`,
-      })
-      recentVerdicts.push('measure_failed')
-      persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
-      continue
-    }
-
-    budget.add(measurement.totalCostUsd)
-    const scoreBefore = currentScore
-    const scoreAfter = measurement.overall
-    const scoreDelta = scoreAfter - scoreBefore
-    const confidence = computeConfidence(scoreDelta, historicalDeltas)
-    historicalDeltas.push(scoreDelta)
-
-    emitter.emit({
-      type: 'measurement:complete',
-      iteration,
-      elapsedMs: now() - startedAt,
-      costUsd: budget.total(),
-      scoreDelta,
-      confidence: confidence.level,
-      productId: product.id,
-      scoreBefore,
-      scoreAfter,
-    })
-
-    let verdict: Verdict
-    let revertResult: RevertResult | undefined
-    let errorField: string | undefined
-
-    if (scoreAfter > scoreBefore) {
-      if (confidence.level === 'high') {
-        verdict = 'kept'
-      } else {
-        verdict = 'kept_uncertain'
-      }
-      currentScore = scoreAfter
-      currentByQuery = measurement.byQuery
-      lastModified.set(product.id, iteration)
-      sessionLogger.recordProductTouched(product.id)
-    } else {
-      verdict = 'reverted'
-      try {
-        revertResult = await reverter.revert(applyResult)
-      } catch (err) {
-        errorField = `revert failed: ${errorMessage(err)}`
-      }
-    }
-
-    const log = buildLog({
-      hypothesis,
-      iteration,
-      verdict,
-      scoreBefore,
-      scoreAfter,
-      scoreDelta,
-      confidenceScore: isFinite(confidence.score) ? confidence.score : 1000,
-      confidenceLevel: confidence.level,
-      durationMs: now() - iterStart,
-      costEstimateUsd: measurement.totalCostUsd + iterCost,
-      applyResult,
-      revertResult,
-      error: errorField,
-    })
-    jsonl.append(log)
-
-    const eventType =
-      verdict === 'kept'
-        ? 'experiment:kept'
-        : verdict === 'kept_uncertain'
-          ? 'experiment:kept_uncertain'
-          : 'experiment:reverted'
-    emitter.emit({
-      type: eventType,
-      iteration,
-      elapsedMs: now() - startedAt,
-      costUsd: budget.total(),
-      scoreDelta,
-      confidence: confidence.level,
-      productId: product.id,
-      log,
-    })
-    if (verdict === 'kept' || verdict === 'kept_uncertain') {
-      sessionLogger.recordKeyWin({
-        iteration,
-        productId: product.id,
-        productTitle: hypothesis.productTitle,
-        description: hypothesis.description,
-        scoreDelta,
-      })
-    } else {
-      sessionLogger.recordDeadEnd({
-        iteration,
-        productId: product.id,
-        productTitle: hypothesis.productTitle,
-        description: hypothesis.description,
-        reason: errorField ?? `reverted (Δ ${scoreDelta.toFixed(2)}, ${confidence.level})`,
-      })
-    }
-    recentVerdicts.push(verdict)
-    persistSession(sessionLogger, iteration, currentScore, budget, startedAt, now())
-
-    if (
-      !budgetWarned &&
-      budget.total() >= BUDGET_WARN_FRACTION * config.loop.budgetLimitUsd
-    ) {
-      emitter.emit({
-        type: 'budget:warning',
-        iteration,
-        elapsedMs: now() - startedAt,
-        costUsd: budget.total(),
-        scoreDelta: 0,
-        confidence: 'noise',
-        cumulativeCostUsd: budget.total(),
-        limitUsd: config.loop.budgetLimitUsd,
-        remainingUsd: budget.remaining(),
-      })
-      budgetWarned = true
-    }
-
-    if (budget.exhausted()) {
-      stopReason = 'budget exhausted'
-      break
-    }
-
-    if (recentVerdicts.length >= NO_KEEP_STOP_WINDOW) {
-      const window = recentVerdicts.slice(-NO_KEEP_STOP_WINDOW)
-      if (!window.some((v) => v === 'kept' || v === 'kept_uncertain')) {
-        stopReason = `no kept changes in last ${NO_KEEP_STOP_WINDOW} iterations`
-        break
-      }
-    }
-
-    if (historicalDeltas.length >= PLATEAU_WINDOW) {
-      const window = historicalDeltas.slice(-PLATEAU_WINDOW)
-      const avg = window.reduce((s, d) => s + d, 0) / window.length
-      if (avg < PLATEAU_THRESHOLD) {
-        stopReason = `score improvement averaged ${avg.toFixed(2)}/iter over last ${PLATEAU_WINDOW}`
-        break
-      }
-    }
+async function handleMeasureFailure(
+  ctx: LoopContext,
+  err: unknown,
+  applyResult: ApplyResult,
+  hypothesis: Hypothesis,
+  product: ShopifyProduct,
+  iteration: number,
+  iterStart: number,
+  iterCost: number,
+): Promise<void> {
+  const errMsg = errorMessage(err)
+  let revertError: string | undefined
+  let revertResult: RevertResult | undefined
+  try {
+    revertResult = await ctx.reverter.revert(applyResult)
+  } catch (revertErr) {
+    revertError = errorMessage(revertErr)
   }
+  const log = buildLog({
+    hypothesis,
+    iteration,
+    verdict: 'measure_failed',
+    scoreBefore: ctx.currentScore,
+    scoreAfter: ctx.currentScore,
+    scoreDelta: 0,
+    confidenceScore: 0,
+    confidenceLevel: 'noise',
+    durationMs: ctx.now() - iterStart,
+    costEstimateUsd: iterCost,
+    applyResult,
+    revertResult,
+    error: revertError ? `${errMsg}; revert failed: ${revertError}` : errMsg,
+  })
+  ctx.jsonl.append(log)
+  ctx.sessionLogger.recordDeadEnd({
+    iteration,
+    productId: product.id,
+    productTitle: hypothesis.productTitle,
+    description: hypothesis.description,
+    reason: revertError
+      ? `measure failed: ${errMsg}; revert failed: ${revertError}`
+      : `measure failed: ${errMsg}`,
+  })
+  ctx.recentVerdicts.push('measure_failed')
+  persistSession(ctx, iteration)
+}
 
-  const finalState = sessionLogger.end(currentScore, stopReason)
-  emitter.emit({
+function maybeEmitBudgetWarning(ctx: LoopContext, iteration: number): void {
+  if (ctx.budgetWarned) return
+  if (ctx.budget.total() < BUDGET_WARN_FRACTION * ctx.config.loop.budgetLimitUsd) return
+  ctx.emitter.emit({
+    type: 'budget:warning',
+    iteration,
+    elapsedMs: ctx.now() - ctx.startedAt,
+    costUsd: ctx.budget.total(),
+    scoreDelta: 0,
+    confidence: 'noise',
+    cumulativeCostUsd: ctx.budget.total(),
+    limitUsd: ctx.config.loop.budgetLimitUsd,
+    remainingUsd: ctx.budget.remaining(),
+  })
+  ctx.budgetWarned = true
+}
+
+function emitSessionStart(ctx: LoopContext, baselineScore: number): void {
+  ctx.emitter.emit({
+    type: 'session:start',
+    iteration: 0,
+    elapsedMs: ctx.now() - ctx.startedAt,
+    costUsd: ctx.budget.total(),
+    scoreDelta: 0,
+    confidence: 'noise',
+    baselineScore,
+    queriesCount: ctx.queries.length,
+    productsCount: ctx.products.length,
+    maxIterations: ctx.config.loop.maxIterations,
+    budgetLimitUsd: ctx.config.loop.budgetLimitUsd,
+  })
+}
+
+function emitSessionEnd(
+  ctx: LoopContext,
+  iteration: number,
+  baselineScore: number,
+  stopReason: string,
+): void {
+  ctx.emitter.emit({
     type: 'session:end',
     iteration,
-    elapsedMs: now() - startedAt,
-    costUsd: budget.total(),
-    scoreDelta: currentScore - baseline.overall,
+    elapsedMs: ctx.now() - ctx.startedAt,
+    costUsd: ctx.budget.total(),
+    scoreDelta: ctx.currentScore - baselineScore,
     confidence: 'noise',
-    finalScore: currentScore,
-    baselineScore: baseline.overall,
-    totalIterations: finalState.iteration,
-    totalCostUsd: budget.total(),
+    finalScore: ctx.currentScore,
+    baselineScore,
+    totalIterations: ctx.sessionLogger.state?.iteration ?? iteration,
+    totalCostUsd: ctx.budget.total(),
     stopReason,
   })
-  return finalState
 }
 
 interface PerProductScore {
@@ -683,19 +881,12 @@ function buildLog(input: BuildLogInput): ExperimentLog {
   }
 }
 
-function persistSession(
-  sessionLogger: SessionLogger,
-  iteration: number,
-  currentScore: number,
-  budget: BudgetTracker,
-  startedAt: number,
-  nowMs: number,
-): void {
-  sessionLogger.update({
+function persistSession(ctx: LoopContext, iteration: number): void {
+  ctx.sessionLogger.update({
     iteration,
-    currentScore,
-    cumulativeCostUsd: budget.total(),
-    elapsedMs: nowMs - startedAt,
+    currentScore: ctx.currentScore,
+    cumulativeCostUsd: ctx.budget.total(),
+    elapsedMs: ctx.now() - ctx.startedAt,
   })
 }
 
@@ -751,7 +942,7 @@ function stubHypothesis(product: ShopifyProduct): Hypothesis {
     type: 'title_rewrite',
     productId: product.id,
     productTitle: product.title,
-    field: '(none)',
+    field: BASELINE_FIELD_SENTINEL,
     before: '',
     after: '',
     description: 'hypothesis generation failed',

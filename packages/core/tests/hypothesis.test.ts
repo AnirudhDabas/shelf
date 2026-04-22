@@ -51,7 +51,7 @@ const validPayload = {
 }
 
 describe('HypothesisGenerator.generate', () => {
-  it('parses a well-formed JSON payload into a Hypothesis with all SPEC fields', async () => {
+  it('parses a well-formed JSON payload into a Hypothesis with all required fields', async () => {
     const gen = makeGenerator(JSON.stringify(validPayload))
     const result = await gen.generate({
       product: product(),

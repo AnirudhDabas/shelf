@@ -37,6 +37,33 @@ describe('computeConfidence', () => {
     expect(result.sampleSize).toBe(2)
   })
 
+  it('returns noise for an empty history (sampleSize=0)', () => {
+    const result = computeConfidence(10, [])
+    expect(result.level).toBe('noise')
+    expect(result.sampleSize).toBe(0)
+    expect(result.mad).toBe(0)
+  })
+
+  it('returns noise for a single historical sample', () => {
+    const result = computeConfidence(10, [3])
+    expect(result.level).toBe('noise')
+    expect(result.sampleSize).toBe(1)
+  })
+
+  it('treats negative deltas symmetrically (uses absolute value)', () => {
+    const history = [0.1, -0.1, 0.05, -0.05, 0.0]
+    const positive = computeConfidence(5, history)
+    const negative = computeConfidence(-5, history)
+    expect(negative.level).toBe(positive.level)
+    expect(negative.score).toBe(positive.score)
+  })
+
+  it('classifies a large negative delta on a stable history as high', () => {
+    const result = computeConfidence(-5, [0.1, -0.1, 0.05, -0.05, 0.0])
+    expect(result.level).toBe('high')
+    expect(result.score).toBeGreaterThan(3)
+  })
+
   it('returns noise when delta is zero and all history is zero (MAD=0 degenerate)', () => {
     const result = computeConfidence(0, [0, 0, 0, 0])
     expect(result.level).toBe('noise')

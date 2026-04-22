@@ -24,15 +24,22 @@ The judges aren't heuristics. They're the actual AI agents shoppers use.
 ## Quick start
 
 ```bash
-git clone https://github.com/AnirudhDabas/shelf
-cd shelf
-pnpm install            # builds @shelf/core via the prepare hook
-$ npx shelf-ai init     # interactive .env setup
+npx shelf-ai init       # interactive .env setup
 npx shelf-ai run        # start the loop
 npx shelf-ai dashboard  # live view at http://localhost:3000
 ```
 
-Requires Node ≥ 20 and pnpm ≥ 9. Try the loop without any API keys via `npx shelf-ai run --dry-run --no-shopify`.
+Requires Node ≥ 20. Try the loop without any API keys via `npx shelf-ai run --dry-run --no-shopify`.
+
+### From source
+
+```bash
+git clone https://github.com/AnirudhDabas/shelf
+cd shelf
+pnpm install
+pnpm build
+node packages/core/dist/cli.js init
+```
 
 ## The loop
 
@@ -136,6 +143,10 @@ See [docs/optimization-trace-example.md](docs/optimization-trace-example.md) for
 Shopify activated Agentic Storefronts for all merchants on 2026-03-24. [5.6M stores](https://www.shopify.com/news/agentic-storefronts), and the [880M monthly AI users figure](https://openai.com/index/chatgpt-search) combines ChatGPT, Perplexity, and Gemini's public usage disclosures. Most stores are invisible because their product data isn't structured for machine consumption.
 
 This closes the loop.
+
+## Privacy
+
+`shelf` writes only to your local disk (`shelf.jsonl`, `shelf.md`, `.shelf-cache/`) and to the third-party APIs you've configured (Shopify, Anthropic, optionally OpenAI/Perplexity). No telemetry, no analytics, no phone-home. Your API keys live in `.env` and never leave your machine.
 
 ## License
 

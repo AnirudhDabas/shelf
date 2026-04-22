@@ -3,6 +3,7 @@ import { retry } from '../utils/retry.js'
 import { FileCache, cacheKey } from '../utils/cache.js'
 import { estimateCost } from '../utils/cost.js'
 import { detectDomainAppearance } from './detect.js'
+import { createResponse } from './openai-responses.js'
 import type { ScoringProvider, ScoringQuery, ScoringResult } from './types.js'
 
 const MODEL = 'gpt-4o-mini'
@@ -57,16 +58,10 @@ export class OpenAIScorer implements ScoringProvider {
     const cached = this.cache?.get<ScoringResult>(key)
     if (cached) return cached
 
-    // We bypass the SDK's typed overloads because web_search is a recent tool
-    // whose schema the installed openai types may not carry yet.
-    const create = (this.client as unknown as {
-      responses: { create: (body: unknown, opts?: unknown) => Promise<ResponsesApiResponse> }
-    }).responses.create
-
-    const response = await retry(
+    const response = (await retry(
       () =>
-        create.call(
-          (this.client as unknown as { responses: unknown }).responses,
+        createResponse(
+          this.client,
           {
             model: MODEL,
             tools: [{ type: 'web_search' }],
@@ -75,7 +70,7 @@ export class OpenAIScorer implements ScoringProvider {
           { timeout: TIMEOUT_MS },
         ),
       { attempts: 3, baseDelayMs: 1000 },
-    )
+    )) as unknown as ResponsesApiResponse
 
     const { text, urls } = extractTextAndUrls(response)
     const detection = detectDomainAppearance(storeDomain, text, urls)

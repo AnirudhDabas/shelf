@@ -6,7 +6,7 @@ import {
   readSync,
   statSync,
 } from 'node:fs'
-import { isAbsolute, resolve } from 'node:path'
+import { basename, isAbsolute, resolve } from 'node:path'
 import { Buffer } from 'node:buffer'
 import type { NextRequest } from 'next/server'
 
@@ -49,8 +49,8 @@ function readElapsedMultiplier(): number {
 
 export function GET(req: NextRequest): Response {
   const file = logPath()
+  const fileLabel = basename(file)
   const encoder = new TextEncoder()
-  const connId = Math.random().toString(36).slice(2, 8)
 
   const stream = new ReadableStream({
     start(controller) {
@@ -62,8 +62,7 @@ export function GET(req: NextRequest): Response {
         if (closed) return
         try {
           controller.enqueue(encoder.encode(raw))
-        } catch (err) {
-          console.log(`[sse ${connId}] enqueue failed, closing: ${(err as Error).message}`)
+        } catch {
           closed = true
         }
       }
@@ -76,39 +75,32 @@ export function GET(req: NextRequest): Response {
         buffer += chunk
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
-        let emitted = 0
         for (const line of lines) {
           const trimmed = line.trim()
           if (!trimmed) continue
           try {
             send('experiment', JSON.parse(trimmed))
-            emitted++
           } catch {
             // malformed line — skip
           }
         }
-        if (emitted > 0) {
-          console.log(`[sse ${connId}] emitted ${emitted} experiment event(s)`)
-        }
       }
 
-      const readNewBytes = (source: string): void => {
+      const readNewBytes = (): void => {
         if (closed) return
         if (!existsSync(file)) {
-          send('status', { waiting: true, path: file })
+          send('status', { waiting: true, file: fileLabel })
           return
         }
         try {
           const size = statSync(file).size
           if (size < lastSize) {
-            console.log(`[sse ${connId}] ${source}: file truncated (${lastSize} -> ${size}), resetting`)
             lastSize = 0
             buffer = ''
-            send('reset', { path: file })
+            send('reset', { file: fileLabel })
           }
           if (size > lastSize) {
             const newBytes = size - lastSize
-            console.log(`[sse ${connId}] ${source}: reading ${newBytes} new bytes (cursor ${lastSize} -> ${size})`)
             const fd = openSync(file, 'r')
             const buf = Buffer.alloc(newBytes)
             readSync(fd, buf, 0, newBytes, lastSize)
@@ -117,7 +109,6 @@ export function GET(req: NextRequest): Response {
             flushChunk(buf.toString('utf-8'))
           }
         } catch (err) {
-          console.log(`[sse ${connId}] readNewBytes error: ${(err as Error).message}`)
           send('error', { message: err instanceof Error ? err.message : String(err) })
         }
       }
@@ -125,17 +116,17 @@ export function GET(req: NextRequest): Response {
       // Prime the connection: padding → hello → full backlog.
       enqueue(INITIAL_PADDING)
       send('hello', {
-        path: file,
+        file: fileLabel,
         startedAt: new Date().toISOString(),
         elapsedMultiplier: readElapsedMultiplier(),
       })
-      readNewBytes('initial')
+      readNewBytes()
 
       // fs.watch / watchFile both failed to fire on appends mid-stream in
       // this setup. Plain setInterval polling is reliable.
       const poll = setInterval(() => {
         if (closed) return
-        readNewBytes('poll')
+        readNewBytes()
       }, POLL_INTERVAL_MS)
 
       const heartbeat = setInterval(() => {
@@ -144,7 +135,6 @@ export function GET(req: NextRequest): Response {
       }, HEARTBEAT_MS)
 
       req.signal.addEventListener('abort', () => {
-        console.log(`[sse ${connId}] client aborted, clearing poll + heartbeat`)
         closed = true
         clearInterval(poll)
         clearInterval(heartbeat)
@@ -154,8 +144,6 @@ export function GET(req: NextRequest): Response {
           // already closed
         }
       })
-
-      console.log(`[sse ${connId}] connection established, polling ${file} every ${POLL_INTERVAL_MS}ms`)
     },
   })
 

@@ -162,7 +162,7 @@ async function main() {
   const client = createAdminApiClient({
     storeDomain,
     accessToken,
-    apiVersion: '2026-01',
+    apiVersion: '2026-04',
   })
 
   console.log(`seeding ${products.length} products into ${storeDomain}…`)

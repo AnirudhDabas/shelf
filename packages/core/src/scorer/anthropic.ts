@@ -3,6 +3,7 @@ import { retry } from '../utils/retry.js'
 import { FileCache, cacheKey } from '../utils/cache.js'
 import { estimateCost } from '../utils/cost.js'
 import { detectDomainAppearance } from './detect.js'
+import { toAnthropicTools, type WebSearchServerTool } from './anthropic-server-tools.js'
 import type { ScoringProvider, ScoringQuery, ScoringResult } from './types.js'
 
 const MODEL = 'claude-sonnet-4-6'
@@ -52,19 +53,17 @@ export class AnthropicScorer implements ScoringProvider {
     const cached = this.cache?.get<ScoringResult>(key)
     if (cached) return cached
 
-    const response = await retry(
+    const tools: WebSearchServerTool[] = [
+      { type: 'web_search_20250305', name: WEB_SEARCH_TOOL_NAME, max_uses: 3 },
+    ]
+
+    const response = (await retry(
       () =>
         this.client.messages.create(
           {
             model: MODEL,
             max_tokens: 1024,
-            tools: [
-              {
-                type: 'web_search_20250305',
-                name: WEB_SEARCH_TOOL_NAME,
-                max_uses: 3,
-              },
-            ] as unknown as Anthropic.Tool[],
+            tools: toAnthropicTools(tools),
             messages: [
               {
                 role: 'user',
@@ -73,9 +72,9 @@ export class AnthropicScorer implements ScoringProvider {
             ],
           },
           { timeout: TIMEOUT_MS },
-        ) as unknown as Promise<AnthropicMessageResponse>,
+        ),
       { attempts: 3, baseDelayMs: 1000 },
-    )
+    )) as unknown as AnthropicMessageResponse
 
     const { text, urls } = extractTextAndUrls(response)
     const detection = detectDomainAppearance(storeDomain, text, urls)

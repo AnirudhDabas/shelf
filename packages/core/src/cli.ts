@@ -22,7 +22,7 @@ import { FileCache } from './utils/cache.js'
 const program = new Command()
 
 program
-  .name('shelf')
+  .name('shelf-ai')
   .description(
     'Autoresearch loop for Shopify catalogs — raise how often AI shopping agents surface your products.',
   )
@@ -43,8 +43,36 @@ program
       const answer = (await rl.question(chalk.cyan(prompt))).trim()
       return answer || fallback
     }
-    console.log(chalk.bold('\nshelf init\n'))
-    const domain = await ask('Shopify store domain (e.g. my-shop.myshopify.com): ')
+    const askValidated = async (
+      prompt: string,
+      validate: (raw: string) => string | null,
+      opts: { required: boolean } = { required: true },
+    ): Promise<string> => {
+      for (;;) {
+        const raw = (await rl.question(chalk.cyan(prompt))).trim()
+        if (!raw) {
+          if (!opts.required) return ''
+          console.log(chalk.yellow('  ! required — please enter a value.'))
+          continue
+        }
+        const err = validate(raw)
+        if (err) {
+          console.log(chalk.yellow(`  ! ${err}`))
+          continue
+        }
+        return raw
+      }
+    }
+    console.log(chalk.bold('\nshelf-ai init\n'))
+    const domain = await askValidated(
+      'Shopify store domain (e.g. my-shop.myshopify.com): ',
+      (raw) => {
+        const stripped = raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+        return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(stripped)
+          ? null
+          : 'expected a *.myshopify.com domain'
+      },
+    ).then((raw) => raw.replace(/^https?:\/\//i, '').replace(/\/+$/, ''))
     console.log(
       chalk.dim(
         '\nFor Admin API auth, prefer OAuth client credentials (auto-refreshing 24h tokens).\nLeave both blank to fall back to a long-lived SHOPIFY_ADMIN_ACCESS_TOKEN.\n',
@@ -54,11 +82,22 @@ program
     const clientSecret = clientId ? await ask('Shopify OAuth client secret: ') : ''
     const adminToken = clientId
       ? ''
-      : await ask('Shopify Admin API access token (shpat_…): ')
+      : await askValidated(
+          'Shopify Admin API access token (shpat_… or shpss_…): ',
+          (raw) =>
+            /^shp(at|ss)_[a-z0-9]+$/i.test(raw)
+              ? null
+              : 'expected a token starting with shpat_ or shpss_',
+          { required: false },
+        )
     console.log(chalk.dim('\nAt least one scoring provider key is required.\n'))
     const perplexity = await ask('Perplexity API key (enter to skip): ')
     const openai = await ask('OpenAI API key (enter to skip): ')
-    const anthropic = await ask('Anthropic API key (required for hypothesis + query generation): ')
+    const anthropic = await askValidated(
+      'Anthropic API key (required for hypothesis + query generation): ',
+      (raw) =>
+        raw.startsWith('sk-ant-') ? null : 'expected an Anthropic key starting with sk-ant-',
+    )
     rl.close()
 
     const lines = [`SHOPIFY_STORE_DOMAIN=${domain}`]

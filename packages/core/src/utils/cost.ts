@@ -16,9 +16,22 @@ const PRICING: Record<string, ModelPricing> = {
   'anthropic:claude-haiku-4-5': { inputPer1M: 1.0, outputPer1M: 5.0 },
 }
 
+const warnedUnknownModels = new Set<string>()
+
+// Returns 0 for unknown modelKeys so the caller's accounting doesn't blow up,
+// but emits a single stderr warning per unknown key so the operator notices
+// (silently dropping cost would understate budget consumption).
 export function estimateCost(modelKey: string, usage: TokenUsage): number {
   const pricing = PRICING[modelKey]
-  if (!pricing) return 0
+  if (!pricing) {
+    if (!warnedUnknownModels.has(modelKey)) {
+      warnedUnknownModels.add(modelKey)
+      console.warn(
+        `cost: unknown modelKey "${modelKey}" — reporting $0 for this provider; add it to PRICING in utils/cost.ts`,
+      )
+    }
+    return 0
+  }
   return (usage.input / 1_000_000) * pricing.inputPer1M + (usage.output / 1_000_000) * pricing.outputPer1M
 }
 

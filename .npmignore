@@ -1,0 +1,57 @@
+# shelf-ai uses the `files` allow-list in package.json — only paths listed there
+# are published. This .npmignore is a defense-in-depth fallback in case `files`
+# is removed or misconfigured. Anything sensitive or environmental belongs here.
+
+# Source — only built dist is shipped
+packages/core/src/
+packages/core/tsconfig.json
+packages/core/tsconfig.tsbuildinfo
+packages/core/eslint.config.js
+packages/core/vitest.config.ts
+
+# Tests and fixtures
+packages/core/tests/
+fixtures/
+**/*.test.ts
+**/*.test.js
+
+# Other workspaces
+apps/
+
+# Dev tooling and config
+.github/
+.vscode/
+.husky/
+scripts/
+turbo.json
+.eslintrc*
+eslint.config.*
+.prettierrc*
+.editorconfig
+tsconfig*.json
+vitest.config.*
+
+# Local artifacts and logs
+shelf.jsonl
+shelf.md
+*.log
+.turbo/
+coverage/
+node_modules/
+
+# Env and secrets — never publish
+.env
+.env.*
+!.env.example
+
+# CI and docs scaffolding
+docs/
+CONTRIBUTING.md
+CHANGELOG.md
+ROADMAP.md
+
+# OS and editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

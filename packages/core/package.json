@@ -6,7 +6,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "shelf": "./dist/cli.js"
+    "shelf-ai": "./dist/cli.js"
   },
   "files": [
     "dist"
@@ -24,7 +24,7 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "prepare": "tsc"
+    "prepublishOnly": "tsc"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.1",

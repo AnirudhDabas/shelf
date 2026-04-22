@@ -5,7 +5,7 @@ import { ScoreChart } from '../components/score-chart'
 import { StatusBar } from '../components/status-bar'
 
 export default function Page() {
-  const { experiments, waitingForFile, connected, path, elapsedMultiplier } = useEvents()
+  const { experiments, waitingForFile, connected, file, elapsedMultiplier } = useEvents()
   const startedAt = experiments[0]?.timestamp ?? null
 
   return (
@@ -24,7 +24,7 @@ export default function Page() {
             }`}
           />
           {connected ? 'connected' : 'disconnected'}
-          {path ? <span className="ml-2">· {path}</span> : null}
+          {file ? <span className="ml-2">· {file}</span> : null}
         </div>
       </header>
       <StatusBar
@@ -37,7 +37,7 @@ export default function Page() {
       {waitingForFile && experiments.length === 0 ? (
         <div className="px-6 py-6 text-sm text-text-secondary">
           no experiments yet. run{' '}
-          <code className="font-mono text-text-primary">npx shelf run</code> in the same
+          <code className="font-mono text-text-primary">npx shelf-ai run</code> in the same
           directory to populate the log.
         </div>
       ) : null}

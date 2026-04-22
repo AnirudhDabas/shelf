@@ -8,13 +8,14 @@
  */
 import { writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { JsonlLogger, type ExperimentLog } from '@shelf/core'
+import { JsonlLogger, type ExperimentLog, type Verdict } from '@shelf/core'
 
-const VERDICT_EMOJI: Record<ExperimentLog['verdict'], string> = {
+const VERDICT_LABEL: Record<Verdict, string> = {
   kept: 'kept',
   kept_uncertain: 'kept (uncertain)',
   reverted: 'reverted',
   checks_failed: 'checks failed',
+  generator_failed: 'generator failed',
   apply_failed: 'apply failed',
   measure_failed: 'measure failed',
 }
@@ -25,7 +26,7 @@ function signed(n: number): string {
 
 function renderEntry(e: ExperimentLog): string {
   const lines: string[] = []
-  lines.push(`## Iteration ${e.iteration} — ${VERDICT_EMOJI[e.verdict]}`)
+  lines.push(`## Iteration ${e.iteration} — ${VERDICT_LABEL[e.verdict]}`)
   lines.push('')
   lines.push(`- **Product**: ${e.hypothesis.productTitle} (\`${e.hypothesis.productId}\`)`)
   lines.push(`- **Type**: ${e.hypothesis.type} on \`${e.hypothesis.field}\``)
@@ -69,6 +70,7 @@ function renderHeader(entries: ExperimentLog[]): string {
   const failed = entries.filter(
     (e) =>
       e.verdict === 'checks_failed' ||
+      e.verdict === 'generator_failed' ||
       e.verdict === 'apply_failed' ||
       e.verdict === 'measure_failed',
   ).length

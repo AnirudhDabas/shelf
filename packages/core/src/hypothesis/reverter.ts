@@ -149,7 +149,5 @@ function buildRevert(
 }
 
 function revertDryRun(applied: ApplyResult): RevertResult {
-  const field = applied.changes[0]?.field ?? applied.type
-  console.log(`[dry-run] would revert ${applied.type} on ${applied.productId} (${field})`)
   return buildRevert(applied, applied.changes.map(reverse), { dryRun: true })
 }

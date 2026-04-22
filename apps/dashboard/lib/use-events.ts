@@ -6,7 +6,7 @@ export interface EventsState {
   experiments: ExperimentLog[]
   waitingForFile: boolean
   connected: boolean
-  path: string | null
+  file: string | null
   elapsedMultiplier: number
 }
 
@@ -19,7 +19,7 @@ export function useEvents(): EventsState {
     experiments: [],
     waitingForFile: true,
     connected: false,
-    path: null,
+    file: null,
     elapsedMultiplier: 1,
   })
 
@@ -29,14 +29,14 @@ export function useEvents(): EventsState {
     // hello fires on every (re)connection. The server replays the full
     // backlog afterwards, so we reset local state to avoid duplicates.
     source.addEventListener('hello', (ev) => {
-      let path: string | null = null
+      let file: string | null = null
       let elapsedMultiplier = 1
       try {
         const payload = JSON.parse((ev as MessageEvent).data) as {
-          path?: string
+          file?: string
           elapsedMultiplier?: number
         }
-        path = payload.path ?? null
+        file = payload.file ?? null
         if (typeof payload.elapsedMultiplier === 'number' && payload.elapsedMultiplier > 0) {
           elapsedMultiplier = payload.elapsedMultiplier
         }
@@ -46,7 +46,7 @@ export function useEvents(): EventsState {
       setState((prev) => ({
         ...prev,
         connected: true,
-        path: path ?? prev.path,
+        file: file ?? prev.file,
         elapsedMultiplier,
         experiments: [],
       }))
