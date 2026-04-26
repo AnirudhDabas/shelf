@@ -60,3 +60,29 @@ export type { ShelfEvent, ShelfEventType, EventBase } from './events/emitter.js'
 
 export { FileCache } from './utils/cache.js'
 export { BudgetTracker } from './utils/cost.js'
+
+export {
+  buildEvalReport,
+  computeHypothesisEffectiveness,
+  computePlateau,
+  computeProviderDisagreement,
+  computeRewardHacking,
+  computeScoreStability,
+  emptyStabilityReport,
+  renderMarkdown,
+} from './eval/index.js'
+export type {
+  BuildEvalReportInput,
+  EvalReport,
+  HypothesisEffectivenessReport,
+  HypothesisEffectivenessRow,
+  PlateauPoint,
+  PlateauReport,
+  ProviderDisagreementReport,
+  RewardHackingReport,
+  RewardHackingRisk,
+  ScoreStabilityProductRow,
+  ScoreStabilityReport,
+  ScoreStabilityVerdict,
+  StabilityInput,
+} from './eval/index.js'

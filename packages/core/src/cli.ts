@@ -10,6 +10,12 @@ import { Command } from 'commander'
 import Table from 'cli-table3'
 import ora from 'ora'
 import { ConfigError, loadConfig } from './config.js'
+import {
+  buildEvalReport,
+  computeScoreStability,
+  emptyStabilityReport,
+  renderMarkdown as renderEvalMarkdown,
+} from './eval/index.js'
 import { ShelfEventEmitter } from './events/emitter.js'
 import type { ShelfEvent } from './events/emitter.js'
 import { JsonlLogger } from './logger/jsonl.js'
@@ -296,6 +302,70 @@ program
       } catch (err) {
         scoreSpin.fail(`Measurement failed: ${errorMessage(err)}`)
         process.exitCode = 1
+      }
+    },
+  )
+
+program
+  .command('eval')
+  .description('Meta-evaluation of the optimization loop: hypothesis effectiveness, score stability, plateau detection, provider disagreement, reward hacking audit.')
+  .option('--live', 'Also run a live re-measurement pass to compute score-stability variance (requires API keys + Shopify access).', false)
+  .option('--json', 'Emit the full report as JSON to stdout instead of the human-readable terminal output.', false)
+  .option('-o, --out <path>', 'Markdown output path', 'shelf-eval.md')
+  .option('--products <n>', 'Number of products to sample for --live stability', parseIntArg, 5)
+  .option('--runs <n>', 'Repeat measurements per product for --live stability', parseIntArg, 5)
+  .option('--store-category <label>', 'Category hint for --live query generation')
+  .action(
+    async (options: {
+      live: boolean
+      json: boolean
+      out: string
+      products: number
+      runs: number
+      storeCategory?: string
+    }) => {
+      const config = safeLoadConfig({})
+      const jsonl = new JsonlLogger(config.paths.logFile)
+      const logs = jsonl.readAll()
+      if (logs.length === 0) {
+        console.error(chalk.red(`✗ no experiments found in ${config.paths.logFile}.`))
+        console.error(chalk.dim('  run `shelf-ai run` (or `--dry-run --no-shopify`) to populate the log first.'))
+        process.exitCode = 1
+        return
+      }
+
+      let stability = emptyStabilityReport(
+        'Run with --live to measure score stability (requires API keys).',
+      )
+      if (options.live) {
+        try {
+          stability = await runLiveStability(config, options)
+        } catch (err) {
+          stability = emptyStabilityReport(
+            `--live stability failed: ${errorMessage(err)}`,
+          )
+        }
+      }
+
+      const report = buildEvalReport({
+        logs,
+        storeDomain: config.store.domain,
+        jsonlPath: jsonl.filePath,
+        scoreStability: stability,
+      })
+
+      if (options.json) {
+        process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+      } else {
+        renderEvalToTerminal(report)
+      }
+
+      const outPath = resolve(process.cwd(), options.out)
+      writeFileSync(outPath, renderEvalMarkdown(report), 'utf-8')
+      if (!options.json) {
+        console.log(chalk.dim(`\n✓ wrote ${outPath}`))
+      } else {
+        console.error(chalk.dim(`✓ wrote ${outPath}`))
       }
     },
   )
@@ -628,6 +698,220 @@ function writeElapsedSidecar(multiplier: number): void {
 
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max - 1) + '…'
+}
+
+async function runLiveStability(
+  config: ReturnType<typeof loadConfig>,
+  options: { products: number; runs: number; storeCategory?: string },
+): Promise<ReturnType<typeof emptyStabilityReport>> {
+  const anthropicKey = config.providers.anthropic?.apiKey
+  if (!anthropicKey) {
+    return emptyStabilityReport(
+      '--live requires ANTHROPIC_API_KEY for query generation.',
+    )
+  }
+  const providers = buildProviders(config, { cache: new FileCache(), dryRun: false })
+  if (providers.length === 0) {
+    return emptyStabilityReport(
+      '--live requires at least one scoring provider (PERPLEXITY_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY).',
+    )
+  }
+
+  let products: ShopifyProduct[]
+  if (config.noShopify) {
+    products = loadFixtureProducts()
+  } else {
+    const adminSpin = ora('Authenticating with Shopify Admin API').start()
+    try {
+      const admin = await ShopifyAdminClient.create({
+        storeDomain: config.store.domain,
+        accessToken: config.store.adminAccessToken,
+        clientId: config.store.clientId,
+        clientSecret: config.store.clientSecret,
+      })
+      adminSpin.succeed('Authenticated')
+      const fetchSpin = ora('Fetching products').start()
+      products = await admin.listProducts()
+      fetchSpin.succeed(`Fetched ${products.length} products`)
+    } catch (err) {
+      adminSpin.fail(`Auth failed: ${errorMessage(err)}`)
+      throw err
+    }
+  }
+
+  const querySpin = ora('Generating queries for stability sample').start()
+  const queryGen = new QueryGenerator({ apiKey: anthropicKey, dryRun: false })
+  const queries = await queryGen.generate({
+    products,
+    count: 50,
+    storeCategory: options.storeCategory,
+  })
+  querySpin.succeed(`Generated ${queries.length} queries`)
+
+  const stabSpin = ora(`Measuring stability across ${options.runs} repeat run(s)…`).start()
+  const result = await computeScoreStability({
+    products,
+    queries,
+    providers,
+    storeDomain: config.store.domain,
+    runs: options.runs,
+    productCount: options.products,
+    repetitions: config.loop.queriesPerMeasurement,
+    onRun: (run, total) => {
+      stabSpin.text = `Stability run ${run}/${total}…`
+    },
+  })
+  stabSpin.succeed('Stability sweep complete')
+  return result
+}
+
+function renderEvalToTerminal(report: ReturnType<typeof buildEvalReport>): void {
+  console.log(chalk.bold.cyan(`\n🛒 shelf eval — ${report.storeDomain}`))
+  console.log(
+    chalk.dim(
+      `${report.totalExperiments} experiment(s) · ${report.generatedAt.slice(0, 10)} · ${report.jsonlPath}\n`,
+    ),
+  )
+
+  console.log(chalk.bold('Hypothesis Effectiveness'))
+  const heff = report.hypothesisEffectiveness
+  if (heff.rows.length === 0) {
+    console.log(chalk.dim('  (no experiments)'))
+  } else {
+    const table = new Table({
+      head: [
+        chalk.bold('type'),
+        chalk.bold('total'),
+        chalk.bold('kept'),
+        chalk.bold('keep %'),
+        chalk.bold('Δ kept'),
+        chalk.bold('Δ rev'),
+        chalk.bold('iters→1st'),
+        chalk.bold('EV'),
+      ],
+    })
+    for (const r of heff.rows) {
+      table.push([
+        r.type,
+        String(r.total),
+        String(r.kept),
+        `${(r.keepRate * 100).toFixed(0)}%`,
+        r.avgScoreDeltaKept.toFixed(2),
+        r.avgScoreDeltaReverted.toFixed(2),
+        r.medianIterationsToFirstKeep === null
+          ? '—'
+          : String(r.medianIterationsToFirstKeep),
+        r.expectedValuePerAttempt.toFixed(2),
+      ])
+    }
+    console.log(table.toString())
+    if (heff.priorityOrder.length > 0) {
+      console.log(
+        chalk.dim(`  priority for 10-iter budget: ${heff.priorityOrder.join(' → ')}`),
+      )
+    }
+  }
+
+  console.log('\n' + chalk.bold('Score Stability'))
+  const stab = report.scoreStability
+  if (!stab.performed) {
+    console.log(chalk.dim(`  ${stab.reason ?? 'skipped'}`))
+  } else if (stab.rows.length === 0) {
+    console.log(chalk.dim(`  ${stab.reason ?? 'no data'}`))
+  } else {
+    const table = new Table({
+      head: [
+        chalk.bold('product'),
+        chalk.bold('mean'),
+        chalk.bold('std'),
+        chalk.bold('CV'),
+        chalk.bold('min'),
+        chalk.bold('max'),
+      ],
+    })
+    for (const r of stab.rows) {
+      table.push([
+        truncate(r.productTitle, 32),
+        r.mean.toFixed(1),
+        r.stdDev.toFixed(2),
+        `${(r.coefficientOfVariation * 100).toFixed(1)}%`,
+        r.min.toFixed(1),
+        r.max.toFixed(1),
+      ])
+    }
+    console.log(table.toString())
+    const verdictColor =
+      stab.verdict === 'stable'
+        ? chalk.green
+        : stab.verdict === 'moderate'
+          ? chalk.yellow
+          : chalk.red
+    console.log(
+      `  mean CV: ${(stab.meanCoefficientOfVariation * 100).toFixed(1)}% — ${verdictColor(stab.verdictMessage)}`,
+    )
+  }
+
+  console.log('\n' + chalk.bold('Plateau Detection'))
+  const plateau = report.plateau
+  if (plateau.series.length === 0) {
+    console.log(chalk.dim(`  ${plateau.verdict}`))
+  } else {
+    const verdictColor = plateau.plateauIteration !== null ? chalk.yellow : chalk.green
+    console.log(`  ${verdictColor(plateau.verdict)}`)
+    console.log(
+      chalk.dim(
+        `  ${plateau.baselineScore.toFixed(1)} → ${plateau.finalScore.toFixed(1)} over ${plateau.totalIterations} iter · cost $${plateau.cumulativeCostUsd.toFixed(4)}` +
+          (plateau.costPerScorePoint !== null
+            ? ` (~$${plateau.costPerScorePoint.toFixed(4)}/pt)`
+            : ''),
+      ),
+    )
+  }
+
+  console.log('\n' + chalk.bold('Provider Disagreement'))
+  const pd = report.providerDisagreement
+  if (!pd.available) {
+    console.log(chalk.dim(`  ${pd.reason ?? 'unavailable'}`))
+  } else {
+    const table = new Table({
+      head: [chalk.bold('provider'), chalk.bold('keep %'), chalk.bold('final')],
+    })
+    for (const name of pd.providers) {
+      const series = pd.perProviderScoreTrajectory[name] ?? []
+      const last = series[series.length - 1]
+      table.push([
+        name,
+        `${(pd.perProviderKeepRate[name] * 100).toFixed(0)}%`,
+        last ? last.score.toFixed(1) : '—',
+      ])
+    }
+    console.log(table.toString())
+    console.log(chalk.dim(`  disagreement rate: ${(pd.disagreementRate * 100).toFixed(1)}% — ${pd.verdict}`))
+  }
+
+  console.log('\n' + chalk.bold('Reward Hacking Audit'))
+  const rh = report.rewardHacking
+  if (!rh.available) {
+    console.log(chalk.dim(`  ${rh.reason ?? 'unavailable'}`))
+  } else {
+    const riskColor =
+      rh.risk === 'high' ? chalk.red : rh.risk === 'medium' ? chalk.yellow : chalk.green
+    console.log(`  Risk: ${riskColor.bold(rh.risk.toUpperCase())} — ${rh.verdict}`)
+    console.log(
+      chalk.dim(
+        `  title slope ${rh.titleLengthSlope.toFixed(3)} ch/iter · grade slope ${rh.descriptionGradeSlope.toFixed(3)}/iter · keyword slope ${rh.keywordDensitySlope.toFixed(3)}/iter`,
+      ),
+    )
+    console.log(
+      chalk.dim(
+        `  coverage: ${rh.productCoverage.uniqueProducts} unique product(s) across ${rh.productCoverage.keptExperiments} kept (top ${(rh.productCoverage.topProductShare * 100).toFixed(0)}%)`,
+      ),
+    )
+    for (const sig of rh.signals) console.log(chalk.yellow(`  ⚠ ${sig}`))
+  }
+
+  console.log('\n' + chalk.bold('Summary'))
+  console.log(`  ${report.summary}`)
 }
 
 export { program }
