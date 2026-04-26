@@ -25,6 +25,7 @@ The judges aren't heuristics. They're the actual AI agents shoppers use.
 npx shelf-ai init       # interactive .env setup
 npx shelf-ai run        # start the loop
 npx shelf-ai dashboard  # live view at http://localhost:3000
+npx shelf-ai eval       # meta-evaluation of the loop's own behavior
 ```
 
 Requires Node ≥ 20. Try the loop without any API keys via `npx shelf-ai run --dry-run --no-shopify`.
@@ -129,6 +130,28 @@ Failed checks are logged with `verdict: "checks_failed"` without touching the st
 ## Optimization trace
 
 See [docs/optimization-trace-example.md](docs/optimization-trace-example.md) for a worked example with 12 real experiments, before/after diffs, and score deltas.
+
+## shelf eval — evaluating the loop itself
+
+```bash
+npx shelf-ai eval                # offline analyses against shelf.jsonl
+npx shelf-ai eval --live         # also run a live score-stability sweep
+npx shelf-ai eval --json         # raw JSON to stdout
+npx shelf-ai eval -o report.md   # write the markdown report somewhere other than shelf-eval.md
+npx shelf-ai eval --live --products 5 --runs 5   # tune the stability sweep
+```
+
+`shelf eval` is a meta-evaluation layer: it reads `shelf.jsonl` and produces a rigorous statistical analysis of how well the optimization loop is actually working. Five sections:
+
+1. **Hypothesis Effectiveness** — keep rate, average score delta (kept and reverted), median iterations to first keep, and a recommended priority order if you only had budget for ~10 iterations.
+2. **Score Stability** *(--live)* — re-measures 5 products 5 times each *without changing anything* and reports per-product mean/std/CV. Verdicts: stable (<5% CV), moderate (5-15%), unstable (>15%).
+3. **Plateau Detection** — rolling-average score curve, plus the iteration where the loop stopped paying back its API spend.
+4. **Provider Disagreement** — per-provider keep rates and score trajectories; flags providers that diverge from the rest.
+5. **Reward Hacking Audit** — title-length inflation, readability drift, keyword-density creep, and product-clustering across kept changes. Outputs a Low/Medium/High risk score with evidence.
+
+Output goes to your terminal, with the full markdown report written to `shelf-eval.md`. Add `--json` to pipe the raw structured data into another tool.
+
+Evaluation methodology inspired by Andrew McNamara, Ben Lafferty, and Michael Garner's work on Sidekick evaluation at Shopify — specifically the principles of ground-truth-based evaluation, reward hacking detection, and statistical validation over "vibe testing" ([Building Production Ready Agentic Systems, Shopify Engineering, ICML 2025](https://shopify.engineering/building-production-ready-agentic-systems)).
 
 ## Built with
 

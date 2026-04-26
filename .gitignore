@@ -9,6 +9,9 @@ coverage/
 .DS_Store
 shelf.jsonl
 shelf.md
+shelf-eval.md
+!demo/shelf.jsonl
+!demo/shelf.md
 .shelf-cache/
 .vscode/
 .idea/
