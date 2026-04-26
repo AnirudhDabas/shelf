@@ -1,6 +1,6 @@
 {
   "name": "@shelf/core",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "description": "shelf — autoresearch engine for Shopify catalog optimization",
   "type": "module",
   "main": "./dist/index.js",
