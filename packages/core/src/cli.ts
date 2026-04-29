@@ -9,6 +9,7 @@ import chalk from 'chalk'
 import { Command } from 'commander'
 import Table from 'cli-table3'
 import ora from 'ora'
+import qrcode from 'qrcode-terminal'
 import { ConfigError, loadConfig } from './config.js'
 import {
   buildEvalReport,
@@ -39,6 +40,13 @@ program
     'Autoresearch loop for Shopify catalogs — raise how often AI shopping agents surface your products.',
   )
   .version(pkg.version)
+
+program
+  .command('qr')
+  .description('Print a terminal QR code linking to the shelf GitHub repo (demo aid).')
+  .action(() => {
+    printQrBanner()
+  })
 
 program
   .command('init')
@@ -137,6 +145,7 @@ program
   .option('--repetitions <n>', 'Queries repetitions per measurement', parseIntArg)
   .option('--delay <ms>', 'Artificial delay between iterations in ms (demo/recording aid)', parseIntArg, 0)
   .option('--fake-elapsed', 'Multiply displayed elapsed time by 60 (requires --dry-run; demo aid)', false)
+  .option('--loop', 'After the run completes, automatically restart (demo aid — Ctrl+C to stop)', false)
   .option('--store-category <label>', 'Category hint for hypothesis + query generation')
   .action(
     async (options: {
@@ -147,6 +156,7 @@ program
       repetitions?: number
       delay: number
       fakeElapsed: boolean
+      loop: boolean
       storeCategory?: string
     }) => {
       const noShopify = options.shopify === false
@@ -170,21 +180,28 @@ program
         budgetLimitUsd: options.budget,
         queriesPerMeasurement: options.repetitions,
       })
+      printQrBanner()
       const emitter = new ShelfEventEmitter()
       emitter.onAny(renderEvent)
       console.log(chalk.bold.cyan('\n🛒 shelf run\n'))
       try {
-        const final = await runLoop(config, emitter, {
-          storeCategory: options.storeCategory,
-          iterationDelayMs: options.delay,
-        })
-        console.log(
-          chalk.bold(
-            `\nDone. Final score: ${final.currentScore.toFixed(1)}  (baseline ${final.baselineScore.toFixed(1)}, Δ ${(final.currentScore - final.baselineScore).toFixed(1)})`,
-          ),
-        )
-        console.log(chalk.dim(`Session file: ${config.paths.sessionFile}`))
-        console.log(chalk.dim(`Experiment log: ${config.paths.logFile}`))
+        do {
+          const final = await runLoop(config, emitter, {
+            storeCategory: options.storeCategory,
+            iterationDelayMs: options.delay,
+          })
+          console.log(
+            chalk.bold(
+              `\nDone. Final score: ${final.currentScore.toFixed(1)}  (baseline ${final.baselineScore.toFixed(1)}, Δ ${(final.currentScore - final.baselineScore).toFixed(1)})`,
+            ),
+          )
+          console.log(chalk.dim(`Session file: ${config.paths.sessionFile}`))
+          console.log(chalk.dim(`Experiment log: ${config.paths.logFile}`))
+          if (options.loop) {
+            console.log(chalk.bold.yellow('\n🔄 Loop complete. Restarting in 3s...\n'))
+            await new Promise((r) => setTimeout(r, 3000))
+          }
+        } while (options.loop)
       } catch (err) {
         console.error(chalk.red(`\n✗ run failed: ${errorMessage(err)}`))
         process.exitCode = 1
@@ -698,6 +715,14 @@ function writeElapsedSidecar(multiplier: number): void {
 
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max - 1) + '…'
+}
+
+function printQrBanner(): void {
+  console.log(chalk.bold.cyan('\n  shelf — autoresearch for storefronts\n'))
+  qrcode.generate('https://github.com/AnirudhDabas/shelf', { small: true }, (qr: string) => {
+    console.log(qr)
+  })
+  console.log(chalk.dim('  github.com/AnirudhDabas/shelf\n'))
 }
 
 async function runLiveStability(
