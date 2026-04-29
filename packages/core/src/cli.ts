@@ -341,7 +341,11 @@ program
       runs: number
       storeCategory?: string
     }) => {
-      const config = safeLoadConfig({})
+      // Offline report only needs shelf.jsonl in CWD — load in dry-run/no-shopify
+      // mode so users without a .env (e.g. `npx shelf-ai eval` after a dry-run)
+      // aren't blocked by Shopify/provider key validation. --live still requires
+      // real keys and surfaces its own error.
+      const config = safeLoadConfig({ dryRun: !options.live, noShopify: !options.live })
       const jsonl = new JsonlLogger(config.paths.logFile)
       const logs = jsonl.readAll()
       if (logs.length === 0) {
